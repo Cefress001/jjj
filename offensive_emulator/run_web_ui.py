@@ -53,7 +53,7 @@ def main():
 
     # Import after dependency check
     import uvicorn
-    from app import app
+    from web import app
 
     print("\n📡 Starting API server on http://localhost:8000\n")
     print("🌐 Web UI:    http://localhost:8000/")
