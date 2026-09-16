@@ -4,14 +4,14 @@ FastAPI backend for web UI - run attacks and manage configuration
 """
 
 from fastapi import FastAPI, WebSocket, HTTPException, BackgroundTasks
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse
 import asyncio
 import json
 import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pathlib import Path
+import os
 
 from offensive_emulator_unified import UnifiedOffensiveEmulator
 from config import (
@@ -30,6 +30,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Offensive Emulator v3", version="3.0")
+
+# Get the directory where this script is located
+BASE_DIR = Path(__file__).parent
+STATIC_DIR = BASE_DIR / "static"
 
 # Global state
 active_runs: Dict[str, Dict[str, Any]] = {}
@@ -114,6 +118,41 @@ class AttackRunner:
                 await ws.send_json({"type": "status_update", "data": update})
             except:
                 pass
+
+
+# ============================================================================
+# Root Routes
+# ============================================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Serve main UI"""
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        with open(index_file, 'r', encoding='utf-8') as f:
+            return f.read()
+
+    # Fallback if static files not set up yet
+    return """
+    <html>
+    <head><title>Offensive Emulator v3</title></head>
+    <body>
+        <h1>Offensive Emulator v3</h1>
+        <p>Web UI not found. Check static/index.html exists.</p>
+        <p><a href="/docs">View API Docs</a></p>
+    </body>
+    </html>
+    """
+
+
+@app.get("/index.html", response_class=HTMLResponse)
+async def serve_index():
+    """Serve index.html"""
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        with open(index_file, 'r', encoding='utf-8') as f:
+            return f.read()
+    raise HTTPException(status_code=404, detail="index.html not found")
 
 
 # ============================================================================
@@ -339,28 +378,6 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str):
         logger.error(f"WebSocket error: {e}")
     finally:
         websocket_connections.remove(websocket)
-
-
-# ============================================================================
-# Static Files
-# ============================================================================
-
-# Mount static files (web UI)
-import os
-static_dir = Path(__file__).parent / "static"
-if static_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-
-@app.get("/")
-async def index():
-    """Serve main UI"""
-    index_file = Path(__file__).parent / "static" / "index.html"
-    if index_file.exists():
-        return FileResponse(str(index_file))
-
-    # Fallback if static files not set up yet
-    return {"message": "Offensive Emulator v3 API", "docs": "/docs"}
 
 
 if __name__ == "__main__":
