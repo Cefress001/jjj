@@ -65,22 +65,23 @@ def test_zap_run_through_service(svc, tmp_path, monkeypatch):
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("ZAP_BASELINE_COMMAND", str(fake))
 
-    run = svc.start_run("http://example.test", "maximum", engine="zap")
+    # ZAP augments the normal workflow automatically; it is not selected as a
+    # replacement engine by the caller.
+    run = svc.start_run("http://example.test", "maximum", engine="simulation")
     _wait(run)
     assert run.status == "complete", run.error
-    assert run.report["summary"]["alerts_total"] == 2
+    assert run.report["engine"] == "simulation"
+    assert run.report["scanner_results"]["zap"]["alerts_total"] == 2
+    assert "zap" in run.report["tools_run"]
     assert run.phase_states["recon"] == "complete"
-    assert run.phase_states["exploit"] == "skipped"
     assert any(e["kind"] == "finding" for e in run.events)
     assert any("PASS: baseline fixture" in line["msg"] for line in run.logs)
 
 
-def test_unavailable_zap_is_rejected(svc, monkeypatch):
+def test_unavailable_zap_does_not_block_core_scan(svc, monkeypatch):
     monkeypatch.delenv("ZAP_BASELINE_COMMAND", raising=False)
-    monkeypatch.setattr(svc.zap_adapter.shutil, "which", lambda _: None)
-    try:
-        svc.start_run("http://example.test", engine="zap")
-        raised = False
-    except ValueError as exc:
-        raised = "unavailable" in str(exc).lower()
-    assert raised
+    monkeypatch.setattr(svc.scanner_pipeline.zap_adapter.shutil, "which", lambda _: None)
+    run = svc.start_run("http://example.test", "maximum", engine="simulation")
+    _wait(run)
+    assert run.status == "complete"
+    assert run.report["scanner_results"]["zap"]["status"] == "unavailable"

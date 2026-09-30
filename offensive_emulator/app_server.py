@@ -175,7 +175,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "version": VERSION,
                 "engine": attack_service.ENGINE_MODE,
                 "real_engines_available": attack_service._HAS_REAL_ENGINES,
-                "engines": attack_service.available_engines(),
+                "scanners": attack_service.scanner_pipeline.availability(),
                 "demo_target_url": f"http://127.0.0.1:{port}/demo",
                 "time": time.time(),
             })
@@ -185,7 +185,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self._json({
                 "version": VERSION,
                 "engine": attack_service.ENGINE_MODE,
-                "engines": attack_service.available_engines(),
+                "scanners": attack_service.scanner_pipeline.availability(),
                 "phases": PHASES,
                 "presets": PRESETS,
                 "mitre": remediation.MITRE,
@@ -211,18 +211,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             target = str(data.get("target") or "").strip()
             preset = str(data.get("preset") or "balanced").strip()
-            engine = str(data.get("engine") or attack_service.ENGINE_MODE).strip()
             if not target:
                 self._json({"error": "target is required"}, 400)
                 return
             if preset not in PRESETS:
                 self._json({"error": f"unknown preset '{preset}'"}, 400)
                 return
-            try:
-                run = start_run(target, preset, engine=engine)
-            except ValueError as exc:
-                self._json({"error": str(exc)}, 400)
-                return
+            run = start_run(target, preset)
             self._json(run.snapshot(), 201)
             return
 
@@ -324,6 +319,7 @@ def render_report_html(report: Dict, print_mode: bool = False) -> str:
     else:
         stats = [
             ("Endpoints discovered", report.get("recon_results", {}).get("endpoints_discovered", 0)),
+            ("Scanner findings", summ.get("scanner_findings", 0)),
             ("Exploit methods", ", ".join(report.get("exploit_results", {}).get("methods", [])) or "—"),
             ("Backdoors installed", report.get("persistence_results", {}).get("backdoors_installed", 0)),
             ("Credentials extracted", report.get("lateral_movement_results", {}).get("credentials_extracted", 0)),

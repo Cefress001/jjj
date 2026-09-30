@@ -1,22 +1,43 @@
-# Offensive Emulator — one-image app (UI + API + built-in demo target)
+# Full Offensive Emulator image: app + all automatic web assessment tools.
 #
 #   docker build -t offensive-emulator .
 #   docker run --rm -p 8000:8000 offensive-emulator
 #
-# Zero Python dependencies at runtime. Pass --build-arg WITH_AIOHTTP=1 to
-# enable the real HTTP attack engines (falls back to simulation otherwise).
+# The scanner binaries are copied from their official images. They run as
+# internal pipeline stages; users still submit one target and receive one report.
 
-FROM python:3.11-slim AS base
+FROM projectdiscovery/httpx:latest AS httpx
+FROM projectdiscovery/katana:latest AS katana
+FROM projectdiscovery/nuclei:latest AS nuclei
+
+FROM ghcr.io/zaproxy/zaproxy:stable
+
+USER root
 WORKDIR /app
-COPY run.py requirements.txt ./
-COPY offensive_emulator ./offensive_emulator
 
-ARG WITH_AIOHTTP=0
-RUN if [ "$WITH_AIOHTTP" = "1" ]; then pip install --no-cache-dir aiohttp; fi
+# ProjectDiscovery publishes static Go binaries at this path in the official
+# images. ZAP and its packaged baseline script are already present under /zap.
+COPY --from=httpx /usr/local/bin/httpx /usr/local/bin/httpx
+COPY --from=katana /usr/local/bin/katana /usr/local/bin/katana
+COPY --from=nuclei /usr/local/bin/nuclei /usr/local/bin/nuclei
 
-ENV PYTHONUNBUFFERED=1
+COPY --chown=zap:zap run.py requirements.txt ./
+COPY --chown=zap:zap offensive_emulator ./offensive_emulator
+
+# The core HTTP workflow uses aiohttp. ZAP's image includes Python because its
+# packaged scans are Python programs; install aiohttp into that interpreter.
+RUN python3 -m pip install --break-system-packages --no-cache-dir aiohttp
+
+ENV PYTHONUNBUFFERED=1 \
+    ZAP_BASELINE_COMMAND="/zap/zap-baseline.py -m 2" \
+    HTTPX_COMMAND="/usr/local/bin/httpx" \
+    KATANA_COMMAND="/usr/local/bin/katana" \
+    NUCLEI_COMMAND="/usr/local/bin/nuclei"
+
+USER zap
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status==200 else 1)"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
+  CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status==200 else 1)"
 
-CMD ["python3", "run.py", "--port", "8000", "--no-open"]
+ENTRYPOINT []
+CMD ["python3", "/app/run.py", "--port", "8000", "--no-open"]

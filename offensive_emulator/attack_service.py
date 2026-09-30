@@ -57,7 +57,7 @@ else:
 
 from simulator import SimulationEngine  # noqa: E402
 import remediation  # noqa: E402
-import zap_adapter  # noqa: E402
+import scanner_pipeline  # noqa: E402
 
 try:
     from attack_modules.challenge import detect_challenge, challenge_label  # noqa: E402
@@ -69,22 +69,10 @@ ENGINE_MODE = "real" if _HAS_REAL_ENGINES else "simulation"
 
 
 def available_engines() -> Dict[str, Dict[str, Any]]:
-    """Execution engines exposed to the UI and API."""
-    zap = zap_adapter.availability()
+    """Core engines; supplemental scanners are automatic, not alternatives."""
     return {
-        "simulation": {
-            "name": "Built-in demo", "available": True,
-            "description": "Safe simulated six-phase workflow",
-        },
-        "real": {
-            "name": "Legacy HTTP checks", "available": _HAS_REAL_ENGINES,
-            "description": "App-specific VulnPay checks (requires aiohttp)",
-        },
-        "zap": {
-            "name": "OWASP ZAP baseline", "available": zap["available"],
-            "description": "Real crawl and passive web security analysis",
-            "reason": zap.get("reason"),
-        },
+        "simulation": {"name": "Built-in workflow", "available": True},
+        "real": {"name": "HTTP workflow", "available": _HAS_REAL_ENGINES},
     }
 
 # ---------------------------------------------------------------------------
@@ -463,10 +451,12 @@ class AttackRun:
             elif key == self.current_phase and state != "running":
                 self.current_phase = None
             idx = [p["key"] for p in PHASES].index(key)
+            # Reserve the final 20% for the automatic supplemental scanners.
+            # This keeps progress honest after the six core phases complete.
             if state == "running":
-                self.progress = max(self.progress, idx / len(PHASES) * 100.0)
+                self.progress = max(self.progress, idx / len(PHASES) * 80.0)
             elif state in ("complete", "failed", "skipped"):
-                self.progress = max(self.progress, (idx + 1) / len(PHASES) * 100.0)
+                self.progress = max(self.progress, (idx + 1) / len(PHASES) * 80.0)
         self._add_event("phase", phase=key, state=state)
 
     def cancel(self) -> bool:
@@ -633,23 +623,7 @@ async def _execute(run: AttackRun) -> None:
             raise AttackAborted()
         run._add_request_event(method, path, status, ms)
 
-    if run.engine == "zap":
-        on_phase("recon", "running")
-        try:
-            report = zap_adapter.run_baseline(
-                run.target, run.run_id, run.log, lambda: run.cancelled,
-            )
-        except InterruptedError as exc:
-            raise AttackAborted() from exc
-        on_phase("recon", "complete")
-        for phase in ("exploit", "persistence", "lateral_movement", "exfiltration", "cover_tracks"):
-            on_phase(phase, "skipped")
-        for finding in report.get("findings", []):
-            run._add_event(
-                "finding", source="zap", severity=finding.get("severity"),
-                name=finding.get("name"), urls=finding.get("urls", [])[:3],
-            )
-    elif run.engine == "real" and _HAS_REAL_ENGINES:
+    if run.engine == "real" and _HAS_REAL_ENGINES:
         # pre-flight: fail fast with a clear reason when the target is dead
         try:
             info = await preflight_check(run.target)
@@ -668,10 +642,21 @@ async def _execute(run: AttackRun) -> None:
         sim = SimulationEngine(run.target, run.run_id, run.preset)
         report = await sim.run(on_phase=on_phase, on_log=on_sim_log, on_request=on_sim_request)
 
-    # The ZAP adapter already emits normalized findings and remediation. Legacy
-    # and simulation reports continue through the MITRE enrichment pipeline.
-    if run.engine != "zap":
-        report = remediation.enrich(report, run.events)
+    report = remediation.enrich(report, run.events)
+
+    # Every installed scanner augments the same run and report. Scanner errors
+    # are isolated so one unavailable integration never discards core results.
+    try:
+        def on_scanner_progress(done: int, total: int) -> None:
+            run.progress = max(run.progress, 80.0 + (done / max(1, total)) * 19.0)
+            run._add_event("scanner_progress", completed=done, total=total)
+
+        scanner_results = scanner_pipeline.run_installed(
+            run.target, run.preset, run.run_id, run.log, lambda: run.cancelled,
+            on_scanner_progress)
+    except InterruptedError as exc:
+        raise AttackAborted() from exc
+    report = scanner_pipeline.merge(report, scanner_results, run._add_event)
     run.report = report
     run.status = "complete"
     run.progress = 100.0

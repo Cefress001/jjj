@@ -31,7 +31,6 @@
   var state = {
     config: null,
     preset: "balanced",
-    engine: null,
     difficulty: "easy",
     runId: null,
     running: false,
@@ -159,37 +158,17 @@
       state.config = cfg;
 
       var badge = $("#engine-badge");
-      badge.textContent = cfg.engine === "real" ? "◈ ENGINE: REAL" : "◈ ENGINE: SIMULATION";
-      badge.className = "engine-badge " + (cfg.engine === "real" ? "real" : "sim");
-      badge.title = cfg.engine === "real"
-        ? "Real HTTP attack engines active (aiohttp detected)"
-        : "Simulation mode — install aiohttp for real HTTP engines";
+      var scannerCount = Object.keys(cfg.scanners || {}).filter(function (key) {
+        return cfg.scanners[key].available;
+      }).length;
+      badge.textContent = scannerCount ? "◈ PIPELINE: " + scannerCount + " TOOLS" :
+        (cfg.engine === "real" ? "◈ ENGINE: REAL" : "◈ ENGINE: SIMULATION");
+      badge.className = "engine-badge " + ((scannerCount || cfg.engine === "real") ? "real" : "sim");
+      badge.title = scannerCount
+        ? "Installed scanners run automatically and merge into one report"
+        : (cfg.engine === "real" ? "Real HTTP workflow active" : "Simulation mode");
       var le = $("#landing-engine");
-      if (le) le.textContent = cfg.engine === "real" ? "REAL" : "SIMULATION";
-
-      var engineSelect = $("#engine-select");
-      var engines = cfg.engines || {};
-      state.engine = state.engine || cfg.engine || "simulation";
-      engineSelect.innerHTML = "";
-      Object.keys(engines).forEach(function (key) {
-        var info = engines[key];
-        var option = document.createElement("option");
-        option.value = key;
-        option.disabled = !info.available;
-        option.textContent = info.name + (info.available ? "" : " — unavailable");
-        option.selected = key === state.engine;
-        engineSelect.appendChild(option);
-      });
-      function updateEngineNote() {
-        state.engine = engineSelect.value;
-        var info = engines[state.engine] || {};
-        $("#engine-note").textContent = info.description || info.reason || "";
-      }
-      engineSelect.addEventListener("change", function () {
-        if (state.running) { engineSelect.value = state.engine; return; }
-        updateEngineNote();
-      });
-      updateEngineNote();
+      if (le) le.textContent = scannerCount ? "MULTI-TOOL" : (cfg.engine === "real" ? "REAL" : "SIMULATION");
 
       var grid = $("#preset-grid");
       grid.innerHTML = "";
@@ -264,7 +243,7 @@
     api("/api/attack/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: target, preset: state.preset, engine: state.engine })
+      body: JSON.stringify({ target: target, preset: state.preset })
     }).then(function (run) {
       state.runId = run.run_id;
       state.running = true;
@@ -731,8 +710,10 @@
     $("#rep-verdict").textContent = report.verdict || "";
     $("#rep-v-target").textContent = report.target;
     $("#rep-v-run").textContent = report.run_id;
-    $("#rep-v-engine").textContent = report.engine === "real" ? "legacy HTTP checks" :
+    var engineText = report.engine === "real" ? "real HTTP workflow" :
       (report.engine === "zap-baseline" ? "OWASP ZAP baseline" : "simulation");
+    if ((report.tools_run || []).length) engineText += " + " + report.tools_run.join(", ");
+    $("#rep-v-engine").textContent = engineText;
     $("#rep-v-time").textContent = (report.total_time_seconds || 0).toFixed(2) + "s · " +
       new Date(report.timestamp || Date.now()).toLocaleString();
 
@@ -839,6 +820,7 @@
     } else {
       tiles = [
         [rr.endpoints_discovered || 0, "endpoints"],
+        [s.scanner_findings || 0, "scanner findings"],
         [(er.methods || []).length, "exploits"],
         [pr.backdoors_installed || 0, "backdoors"],
         [lr.credentials_extracted || 0, "credentials"],

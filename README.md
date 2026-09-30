@@ -58,28 +58,43 @@ pip install aiohttp
 python run.py
 ```
 
-### OWASP ZAP baseline scanning
+### Automatic multi-tool assessment
 
-The console can use an installed [OWASP ZAP](https://www.zaproxy.org/) baseline
-scanner to crawl an authorized website and import real passive-analysis alerts.
-Install ZAP so `zap-baseline.py` is on `PATH`, or point the app to it explicitly:
+The standard Docker image includes four established scanners. They are internal
+pipeline stages—not separate modes—so the interface remains one target, one
+profile, one launch button, and one combined report:
+
+- **httpx** — reachability, redirects, metadata, and technology profiling
+- **Katana** — bounded same-domain crawling and endpoint discovery
+- **OWASP ZAP baseline** — crawling plus passive web-security analysis
+- **Nuclei** — signed/community template checks with DoS, fuzz, and intrusive
+  tags excluded by policy
 
 ```bash
-export ZAP_BASELINE_COMMAND="/opt/zaproxy/zap-baseline.py -m 2"
-python run.py
+docker build -t offensive-emulator .
+docker run --rm -p 8000:8000 offensive-emulator
 ```
 
-Then select **OWASP ZAP baseline** under **Scan engine**. The adapter streams ZAP
-output, supports cancellation and timeouts, imports its JSON report, and
-normalizes alert severity, confidence, CWE, evidence URLs, and remediation into
-the app's report archive. ZAP exit codes that indicate findings are handled as
-completed scans rather than application failures.
+Every installed tool runs automatically on every scan. Output streams into the
+existing terminal; endpoints, technologies, ZAP alerts, Nuclei findings,
+severity, evidence URLs, CWE/CVE metadata, and remediation are normalized and
+deduplicated into the existing report/archive. A failure in one add-on is shown
+in `scanner_results` but does not discard results from the other tools.
 
-A baseline scan crawls the target and performs passive analysis. It does not run
-ZAP's active scanner, but the crawler still sends real requests. Scan only
-systems you own or have explicit authorization to assess. The ZAP option is
-shown as unavailable when its executable is not installed; simulation remains
-available.
+The app uses conservative per-profile rate limits and excludes explicitly
+intrusive Nuclei tags. These tools still make real requests, and ZAP's crawler
+can follow application links. Scan only systems you own or have explicit
+permission to assess.
+
+For a small simulation-only image:
+
+```bash
+docker build -f Dockerfile.lite -t offensive-emulator-lite .
+```
+
+When running directly instead of Docker, installed tools are auto-detected on
+`PATH`. Custom locations can be supplied through `HTTPX_COMMAND`,
+`KATANA_COMMAND`, `NUCLEI_COMMAND`, and `ZAP_BASELINE_COMMAND`.
 
 In the console:
 
@@ -115,9 +130,11 @@ Against HARDENED/FORTIFIED targets you'll watch the chain break — and see exac
 run.py                          ← THE entry point (server or headless CLI)
 offensive_emulator/
 ├── app_server.py               ← unified server: UI + API + demo target (stdlib only)
-├── attack_service.py           ← run manager: threads, event stream, tracing, persistence
-├── simulator.py                ← zero-dependency simulation engine (fallback)
-├── demo_target.py              ← built-in vulnerable "VulnPay" app · 3 difficulty modes
+├── attack_service.py               ← run manager: threads, event stream, tracing, persistence
+├── scanner_pipeline.py             ← automatic httpx/Katana/ZAP/Nuclei orchestration + merge
+├── pd_adapter.py · zap_adapter.py  ← safe subprocess runners + JSON/JSONL normalization
+├── simulator.py                    ← zero-dependency simulation engine (fallback)
+├── demo_target.py                  ← built-in vulnerable "VulnPay" app · 3 difficulty modes
 ├── remediation.py              ← MITRE mapping + remediation knowledge base
 ├── offensive_emulator_unified.py  ← 6-phase orchestrator (real engines)
 ├── attack_modules/             ← the real per-phase HTTP attack engines
