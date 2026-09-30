@@ -48,6 +48,54 @@ def test_projectdiscovery_jsonl_adapters(tmp_path, monkeypatch):
     assert ka["endpoints"] == ["https://example.test/account"]
     assert nu["findings"][0]["severity"] == "Medium"
     assert nu["findings"][0]["cwe_ids"] == ["CWE-693"]
+    assert nu["targets_scanned"] == 1
+
+
+def test_connected_pipeline_feeds_discovery_to_nuclei(monkeypatch):
+    import scanner_pipeline
+
+    available = {
+        "httpx": {"available": True}, "katana": {"available": True},
+        "zap": {"available": False, "reason": "fixture"},
+        "nuclei": {"available": True},
+    }
+    monkeypatch.setattr(scanner_pipeline, "availability", lambda: available)
+    monkeypatch.setattr(scanner_pipeline.pd_adapter, "run_httpx", lambda *args: {
+        "canonical_target": "https://example.test/home",
+        "assets": ["https://example.test/home"],
+        "technologies": ["React"],
+        "records": [{"url": "https://example.test/home", "status_code": 200}],
+    })
+
+    def fake_katana(target, *args):
+        assert target == "https://example.test/home"
+        return {
+            "endpoints": ["https://example.test/api/users", "https://outside.test/escape"],
+            "endpoint_records": [
+                {"url": "https://example.test/api/users", "method": "GET", "status": 200},
+                {"url": "https://outside.test/escape", "method": "GET", "status": 200},
+            ],
+        }
+
+    received = {}
+
+    def fake_nuclei(targets, *args):
+        received["targets"] = list(targets)
+        return {"records_count": 0, "targets_scanned": len(targets), "findings": []}
+
+    monkeypatch.setattr(scanner_pipeline.pd_adapter, "run_katana", fake_katana)
+    monkeypatch.setattr(scanner_pipeline.pd_adapter, "run_nuclei", fake_nuclei)
+    results = scanner_pipeline.run_installed(
+        "http://example.test", "balanced", "run1", lambda *args: None,
+        lambda: False, lambda *args: None)
+
+    assert "https://example.test/api/users" in received["targets"]
+    assert all("outside.test" not in value for value in received["targets"])
+    corpus = results["endpoint_corpus"]
+    assert corpus["primary_url"] == "https://example.test/home"
+    assert corpus["by_source"]["katana"] == 1
+    assert corpus["rejected_by_reason"]["out_of_scope"] == 1
+    assert corpus["selected_for_nuclei"] == len(received["targets"])
 
 
 def test_pipeline_merge_preserves_existing_report():

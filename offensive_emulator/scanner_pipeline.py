@@ -12,6 +12,15 @@ from typing import Any, Callable, Dict, List
 
 import pd_adapter
 import zap_adapter
+from endpoint_corpus import EndpointCorpus
+
+
+_NUCLEI_ENDPOINT_BUDGET = {
+    "stealth": 25,
+    "balanced": 75,
+    "aggressive": 150,
+    "maximum": 300,
+}
 
 
 def availability() -> Dict[str, Dict[str, Any]]:
@@ -50,24 +59,36 @@ def run_installed(target: str, preset: str, run_id: str,
                   log: Callable[[str, str], None],
                   cancelled: Callable[[], bool],
                   progress: Callable[[int, int], None]) -> Dict[str, Dict[str, Any]]:
-    """Run every installed supplemental scanner in a conservative sequence."""
+    """Run installed scanners as a connected, corpus-driven pipeline."""
     installed = availability()
     results: Dict[str, Dict[str, Any]] = {}
+    corpus = EndpointCorpus(target)
 
     if not any(v["available"] for v in installed.values()):
         log("Supplemental scanners are not installed; continuing with the built-in engine.", "INFO")
         progress(4, 4)
-        return {name: {"status": "unavailable", "reason": info.get("reason")}
-                for name, info in installed.items()}
+        results.update({name: {"status": "unavailable", "reason": info.get("reason")}
+                        for name, info in installed.items()})
+        results["endpoint_corpus"] = corpus.summary()
+        return results
 
     log("═" * 62, "PHASE")
-    log("  AUTOMATIC WEB ASSESSMENT · installed tools will run", "PHASE")
-    log("  policy: bounded rates · intrusive/DoS/fuzz Nuclei templates excluded", "INFO")
+    log("  CONNECTED WEB ASSESSMENT · discoveries feed downstream tools", "PHASE")
+    log("  policy: same-host corpus · bounded rates · intrusive/DoS/fuzz templates excluded", "INFO")
     log("═" * 62, "PHASE")
 
     if installed["httpx"]["available"]:
         results["httpx"] = _run_tool(
             "httpx", lambda: pd_adapter.run_httpx(target, preset, log, cancelled), log)
+        httpx = results["httpx"]
+        if httpx.get("status") == "complete":
+            corpus.set_primary(httpx.get("canonical_target") or target, "httpx")
+            for record in httpx.get("records", []) or []:
+                url = (record.get("final_url") or record.get("final-url") or
+                       record.get("url") or record.get("input"))
+                if url:
+                    corpus.add(url, "httpx", status=record.get("status_code"),
+                               content_type=record.get("content_type"))
     else:
         results["httpx"] = {"status": "unavailable", "reason": installed["httpx"].get("reason")}
     progress(1, 4)
@@ -76,7 +97,13 @@ def run_installed(target: str, preset: str, run_id: str,
 
     if installed["katana"]["available"]:
         results["katana"] = _run_tool(
-            "katana", lambda: pd_adapter.run_katana(target, preset, log, cancelled), log)
+            "katana", lambda: pd_adapter.run_katana(
+                corpus.primary_url, preset, log, cancelled), log)
+        for record in results["katana"].get("endpoint_records", []) or []:
+            corpus.add(record.get("url", ""), "katana",
+                       method=record.get("method") or "GET",
+                       status=record.get("status"),
+                       content_type=record.get("content_type"))
     else:
         results["katana"] = {"status": "unavailable", "reason": installed["katana"].get("reason")}
     progress(2, 4)
@@ -85,26 +112,38 @@ def run_installed(target: str, preset: str, run_id: str,
 
     if installed["zap"]["available"]:
         def zap_run() -> Dict[str, Any]:
-            report = zap_adapter.run_baseline(target, run_id, log, cancelled)
+            report = zap_adapter.run_baseline(corpus.primary_url, run_id, log, cancelled)
             return {
                 "alerts_total": report.get("summary", {}).get("alerts_total", 0),
                 "findings": report.get("findings", []),
                 "endpoints": report.get("recon_results", {}).get("endpoints", []),
             }
         results["zap"] = _run_tool("OWASP ZAP", zap_run, log)
+        corpus.add_many(results["zap"].get("endpoints", []) or [], "zap")
     else:
         results["zap"] = {"status": "unavailable", "reason": installed["zap"].get("reason")}
     progress(3, 4)
     if cancelled():
         raise InterruptedError("scan cancelled")
 
+    nuclei_budget = _NUCLEI_ENDPOINT_BUDGET.get(preset, 75)
+    nuclei_targets = corpus.select_for_scanning(nuclei_budget)
     if installed["nuclei"]["available"]:
+        log(f"Nuclei input · {len(nuclei_targets)} in-scope dynamic endpoints from shared corpus", "INFO")
         results["nuclei"] = _run_tool(
-            "nuclei", lambda: pd_adapter.run_nuclei(target, preset, log, cancelled), log)
+            "nuclei", lambda: pd_adapter.run_nuclei(
+                nuclei_targets, preset, log, cancelled), log)
+        results["nuclei"]["endpoint_budget"] = nuclei_budget
     else:
         results["nuclei"] = {"status": "unavailable", "reason": installed["nuclei"].get("reason")}
     progress(4, 4)
 
+    corpus_summary = corpus.summary()
+    corpus_summary["selected_for_nuclei"] = len(nuclei_targets)
+    corpus_summary["nuclei_endpoint_budget"] = nuclei_budget
+    results["endpoint_corpus"] = corpus_summary
+    log(f"Endpoint corpus · {corpus_summary['accepted']} accepted · "
+        f"{corpus_summary['duplicates']} duplicates · {corpus_summary['rejected']} rejected", "OK")
     return results
 
 
@@ -118,6 +157,9 @@ def merge(report: Dict[str, Any], results: Dict[str, Dict[str, Any]],
     """Merge all scanner output into the existing report without changing its API."""
     report = dict(report)
     report["scanner_results"] = results
+    corpus_meta = dict(results.get("endpoint_corpus", {}) or {})
+    corpus_meta.pop("records", None)
+    report["endpoint_corpus"] = corpus_meta
     report["tools_run"] = [name for name, data in results.items()
                            if data.get("status") == "complete"]
 
@@ -141,10 +183,20 @@ def merge(report: Dict[str, Any], results: Dict[str, Dict[str, Any]],
 
     recon = dict(report.get("recon_results") or {})
     endpoints = list(recon.get("endpoints") or [])
-    additions = []
-    additions.extend(results.get("httpx", {}).get("assets", []) or [])
-    additions.extend(results.get("katana", {}).get("endpoints", []) or [])
-    additions.extend(results.get("zap", {}).get("endpoints", []) or [])
+    corpus_records = results.get("endpoint_corpus", {}).get("records", []) or []
+    if corpus_records:
+        additions = [
+            record.get("url") for record in corpus_records
+            if record.get("url") and any(
+                source != "submitted" for source in (record.get("sources") or []))
+        ]
+    else:
+        # Backward compatibility for archived/fixture results created before
+        # the shared corpus existed.
+        additions = []
+        additions.extend(results.get("httpx", {}).get("assets", []) or [])
+        additions.extend(results.get("katana", {}).get("endpoints", []) or [])
+        additions.extend(results.get("zap", {}).get("endpoints", []) or [])
     for endpoint in additions:
         if endpoint not in endpoints:
             endpoints.append(endpoint)

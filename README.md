@@ -47,6 +47,17 @@ Open <http://localhost:8000>, press **LAUNCH CONSOLE**, and fire.
 - **Test suite** — `pytest` (66 tests) + a jsdom DOM integration test driving the real UI
 - **Dockerfile** — `docker build -t offensive-emulator . && docker run -p 8000:8000 offensive-emulator`
 
+## Development roadmap
+
+See [`MASTER_BUILD_PLAN.md`](MASTER_BUILD_PLAN.md) for the phased plan covering
+connected discovery, browser crawling, authentication, schema-driven API tests,
+evidence and verification, policy enforcement, vulnerability intelligence,
+regression scanning, and operator-defined business workflows.
+
+Phase 1 is implemented: httpx establishes the canonical target, Katana and ZAP
+feed a shared in-scope endpoint corpus, and Nuclei consumes a profile-bounded
+list of discovered dynamic endpoints instead of scanning only the root URL.
+
 ## Quick start
 
 ```bash

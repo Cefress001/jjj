@@ -18,9 +18,10 @@ import queue
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
 class ToolError(RuntimeError):
@@ -136,14 +137,18 @@ def run_httpx(target: str, preset: str, log: Callable[[str, str], None],
     )
     assets = []
     technologies = []
+    canonical_target = target
     for item in records:
-        url = item.get("url") or item.get("input")
+        url = item.get("final_url") or item.get("final-url") or item.get("url") or item.get("input")
         if url and url not in assets:
             assets.append(str(url))
+        if url and canonical_target == target:
+            canonical_target = str(url)
         for tech in item.get("tech", []) or item.get("technologies", []) or []:
             if str(tech) not in technologies:
                 technologies.append(str(tech))
-    return {"records": records, "assets": assets, "technologies": technologies}
+    return {"records": records, "assets": assets, "technologies": technologies,
+            "canonical_target": canonical_target}
 
 
 def run_katana(target: str, preset: str, log: Callable[[str, str], None],
@@ -156,12 +161,21 @@ def run_katana(target: str, preset: str, log: Callable[[str, str], None],
         log, cancelled, 300,
     )
     endpoints = []
+    endpoint_records = []
     for item in records:
         request = item.get("request") if isinstance(item.get("request"), dict) else {}
+        response = item.get("response") if isinstance(item.get("response"), dict) else {}
         url = request.get("endpoint") or item.get("url") or item.get("endpoint")
         if url and url not in endpoints:
             endpoints.append(str(url))
-    return {"records_count": len(records), "endpoints": endpoints[:2000]}
+            endpoint_records.append({
+                "url": str(url),
+                "method": str(request.get("method") or item.get("method") or "GET").upper(),
+                "status": response.get("status_code") or response.get("status-code") or item.get("status_code"),
+                "content_type": response.get("content_type") or response.get("content-type"),
+            })
+    return {"records_count": len(records), "endpoints": endpoints[:2000],
+            "endpoint_records": endpoint_records[:2000]}
 
 
 def _nuclei_finding(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -193,14 +207,25 @@ def _nuclei_finding(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def run_nuclei(target: str, preset: str, log: Callable[[str, str], None],
+def run_nuclei(targets: Union[str, List[str]], preset: str,
+               log: Callable[[str, str], None],
                cancelled: Callable[[], bool]) -> Dict[str, Any]:
+    """Run Nuclei against a bounded endpoint list produced by the corpus."""
+    values = [targets] if isinstance(targets, str) else list(targets)
+    values = [str(value).strip() for value in values if str(value).strip()]
+    if not values:
+        raise ToolError("nuclei received no in-scope targets")
     rate = {"stealth": "2", "balanced": "5", "aggressive": "10", "maximum": "20"}.get(preset, "5")
-    records = _run_jsonl(
-        "nuclei", ["-u", target, "-jsonl", "-silent", "-rl", rate,
-                   "-c", "2", "-bs", "1", "-timeout", "8", "-retries", "1",
-                   "-etags", "dos,fuzz,intrusive", "-severity",
-                   "info,low,medium,high,critical"],
-        log, cancelled, 600,
-    )
-    return {"records_count": len(records), "findings": [_nuclei_finding(x) for x in records]}
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="oe-nuclei-",
+                                     suffix=".txt") as target_file:
+        target_file.write("\n".join(values) + "\n")
+        target_file.flush()
+        records = _run_jsonl(
+            "nuclei", ["-l", target_file.name, "-jsonl", "-silent", "-rl", rate,
+                       "-c", "2", "-bs", "1", "-timeout", "8", "-retries", "1",
+                       "-etags", "dos,fuzz,intrusive", "-severity",
+                       "info,low,medium,high,critical"],
+            log, cancelled, 600,
+        )
+    return {"records_count": len(records), "targets_scanned": len(values),
+            "findings": [_nuclei_finding(x) for x in records]}
