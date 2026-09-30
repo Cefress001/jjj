@@ -1,5 +1,4 @@
+# Offensive Emulator v4 runs with ZERO dependencies (simulation engine).
+#
+# Optional — enables the real HTTP attack engines:
 aiohttp>=3.8.0
-asyncio-contextmanager>=1.0.0
-fastapi>=0.100.0
-uvicorn>=0.23.0
-python-multipart>=0.0.6

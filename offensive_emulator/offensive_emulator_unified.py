@@ -264,38 +264,51 @@ class UnifiedOffensiveEmulator:
             logger.error(f"✗ COVER TRACKS ERROR: {e}")
             return False
 
-    async def run_full_attack(self) -> Dict[str, Any]:
+    async def run_full_attack(self, on_phase=None) -> Dict[str, Any]:
         """
         Execute complete attack lifecycle with state threading
         Returns unified threat report
+
+        on_phase(phase_key, status) is an optional callback invoked as each
+        phase transitions: "running" → "complete" | "failed" | "skipped".
+        Raising an exception inside on_phase aborts the attack.
         """
         attack_start = time.time()
 
-        # Execute all phases in sequence with state dependency
-        phase1_success = await self.phase_1_reconnaissance()
+        # Phase pipeline: (key, display label, coroutine, required phase)
+        pipeline = [
+            ("recon",            "RECONNAISSANCE",   self.phase_1_reconnaissance,     None),
+            ("exploit",          "EXPLOITATION",     self.phase_2_exploitation,       "recon"),
+            ("persistence",      "PERSISTENCE",      self.phase_3_persistence,        "exploit"),
+            ("lateral_movement", "LATERAL MOVEMENT", self.phase_4_lateral_movement,   "persistence"),
+            ("exfiltration",     "EXFILTRATION",     self.phase_5_exfiltration,       "lateral_movement"),
+            ("cover_tracks",     "COVER TRACKS",     self.phase_6_cover_tracks,       None),
+        ]
 
-        if phase1_success:
-            phase2_success = await self.phase_2_exploitation()
+        outcome: Dict[str, bool] = {}
 
-            if phase2_success:
-                phase3_success = await self.phase_3_persistence()
+        for key, label, phase_fn, requires in pipeline:
+            # State-dependent gating: a phase only runs if its prerequisite succeeded
+            if requires is not None and not outcome.get(requires):
+                outcome[key] = False
+                if on_phase:
+                    on_phase(key, "skipped")
+                continue
 
-                if phase3_success:
-                    phase4_success = await self.phase_4_lateral_movement()
+            if on_phase:
+                on_phase(key, "running")
 
-                    if phase4_success:
-                        phase5_success = await self.phase_5_exfiltration()
-                    else:
-                        phase5_success = False
-                else:
-                    phase4_success = phase5_success = False
-            else:
-                phase3_success = phase4_success = phase5_success = False
-        else:
-            phase2_success = phase3_success = phase4_success = phase5_success = False
+            outcome[key] = await phase_fn()
 
-        # Final cleanup
-        phase6_success = await self.phase_6_cover_tracks()
+            if on_phase:
+                on_phase(key, "complete" if outcome[key] else "failed")
+
+        phase1_success = outcome["recon"]
+        phase2_success = outcome["exploit"]
+        phase3_success = outcome["persistence"]
+        phase4_success = outcome["lateral_movement"]
+        phase5_success = outcome["exfiltration"]
+        phase6_success = outcome["cover_tracks"]
 
         # Generate comprehensive threat report
         total_time = time.time() - attack_start
@@ -303,6 +316,7 @@ class UnifiedOffensiveEmulator:
         report = {
             "run_id": self.run_id,
             "target": self.target_url,
+            "engine": "real",
             "timestamp": datetime.now().isoformat(),
             "total_time_seconds": total_time,
 
