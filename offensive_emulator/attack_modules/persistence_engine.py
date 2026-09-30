@@ -97,7 +97,7 @@ class PersistenceEngine(PersistenceModule):
                     async with session.post(
                         url,
                         json=payload,
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 201]:
                             logger.info(f"    ✓ Account created: {username}")
@@ -137,7 +137,7 @@ class PersistenceEngine(PersistenceModule):
                 async with session.post(
                     url,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5)
+                    timeout=aiohttp.ClientTimeout(total=12)
                 ) as resp:
                     if resp.status in [200, 201]:
                         logger.info(f"  ✓ API key created: {api_key[:20]}...")
@@ -184,7 +184,7 @@ class PersistenceEngine(PersistenceModule):
                     async with session.post(
                         url,
                         json=payload,
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 201]:
                             logger.info(f"  ✓ Webhook registered for event: {event}")
@@ -221,7 +221,7 @@ class PersistenceEngine(PersistenceModule):
                 async with session.post(
                     url,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5)
+                    timeout=aiohttp.ClientTimeout(total=12)
                 ) as resp:
                     if resp.status in [200, 201]:
                         logger.info(f"  ✓ Cron job scheduled")

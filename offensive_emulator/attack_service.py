@@ -128,6 +128,20 @@ if not any(isinstance(h, logging.NullHandler) for h in _root.handlers):
 # aiohttp request tracer + preset pacing
 # ---------------------------------------------------------------------------
 
+# Real sites and WAFs (Cloudflare et al.) frequently block the default
+# "Python/3.x aiohttp/x.x" fingerprint outright — rotate realistic browser UAs.
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+]
+
+HEARTBEAT_EVERY = 20  # log a liveness line every N requests
+
+
 def _url_path(u) -> str:
     """Best-effort 'method path' string from a URL-ish object."""
     try:
@@ -142,10 +156,55 @@ def _url_path(u) -> str:
         return "<url>"
 
 
+class _PreflightError(Exception):
+    """Target is not reachable — surfaced to the user as a clear failure."""
+
+
+async def preflight_check(target: str) -> Dict[str, Any]:
+    """
+    Quick reachability probe before the engines fire.
+    Raises _PreflightError with a human explanation when the target cannot
+    be reached at all (DNS, refused, TLS, timeout). Any HTTP status counts
+    as reachable — 403/404/5xx are still 'up'.
+    """
+    import aiohttp
+
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    target, timeout=aiohttp.ClientTimeout(total=6 + attempt * 4),
+                    allow_redirects=True,
+                    headers={"User-Agent": random.choice(_USER_AGENTS)},
+                ) as resp:
+                    return {
+                        "status": resp.status,
+                        "server": resp.headers.get("Server", "unknown"),
+                        "final_url": str(resp.url),
+                    }
+        except Exception as exc:
+            last_err = exc
+            # classify by exception TYPE — aiohttp messages mention "ssl:default"
+            # even for plain connection failures, so the message text is unreliable.
+            if "SSL" in type(exc).__name__ or "Certificate" in type(exc).__name__:
+                raise _PreflightError(
+                    f"TLS handshake failed for {target} — the certificate could not be "
+                    f"verified. Use a target with a valid certificate. ({exc})")
+            if attempt == 1:
+                await asyncio.sleep(0.6)
+
+    txt = str(last_err) or type(last_err).__name__
+    raise _PreflightError(
+        f"Target unreachable: {target} — {txt}. Check the URL, that the host is "
+        f"online, and that a firewall is not blocking this machine.")
+
+
 def _install_request_tracer() -> bool:
     """
     Wrap aiohttp.ClientSession._request so every request the engines make is
-    recorded (method/path/status/latency/defense) and paced per preset.
+    recorded (method/path/status/latency/defense), paced per preset, and sent
+    with a realistic browser User-Agent.
     Falls back silently to the unpatched session if anything goes wrong.
     """
     if not _HAS_AIOHTTP:
@@ -160,6 +219,17 @@ def _install_request_tracer() -> bool:
                 lo, hi = PRESETS.get(run.preset, PRESETS["balanced"])["delay"]
                 if hi > 0:
                     await asyncio.sleep(random.uniform(lo, hi))
+                # realistic UA unless the caller set one explicitly
+                headers = kwargs.get("headers")
+                if headers is None:
+                    headers = {}
+                    kwargs["headers"] = headers
+                try:
+                    has_ua = any(str(k).lower() == "user-agent" for k in headers)
+                except Exception:
+                    has_ua = False
+                if not has_ua:
+                    headers["User-Agent"] = random.choice(_USER_AGENTS)
             t0 = time.time()
             try:
                 resp = await orig(self, method, str_or_url, **kwargs)
@@ -168,6 +238,7 @@ def _install_request_tracer() -> bool:
                     run._add_request_event(str(method), _url_path(str_or_url), 0,
                                            (time.time() - t0) * 1000.0,
                                            error=str(exc)[:70])
+                    run._note_request_for_heartbeat()
                 raise
             if run is not None:
                 defense = None
@@ -181,6 +252,7 @@ def _install_request_tracer() -> bool:
                     shown_url = str_or_url
                 run._add_request_event(str(method), _url_path(shown_url), resp.status,
                                        (time.time() - t0) * 1000.0, defense=defense)
+                run._note_request_for_heartbeat()
             return resp
 
         aiohttp.ClientSession._request = _traced
@@ -291,6 +363,8 @@ class AttackRun:
         self.thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._cancel = threading.Event()
+        self._req_count = 0
+        self._req_sum_ms = 0.0
 
     # ---------------------------------------------------------------- events
 
@@ -310,6 +384,15 @@ class AttackRun:
         self._add_event("request", method=method, path=path[:160], status=int(status),
                         ms=round(ms, 1), phase=self.current_phase,
                         error=error, defense=defense)
+        self._req_count += 1
+        self._req_sum_ms += ms
+
+    def _note_request_for_heartbeat(self) -> None:
+        """Every N requests, log a liveness line so long phases never look dead."""
+        if self._req_count and self._req_count % HEARTBEAT_EVERY == 0:
+            avg = self._req_sum_ms / max(1, self._req_count)
+            self.log(f"▸ {self._req_count} requests fired · avg {avg:.0f}ms · "
+                     f"phase: {self.current_phase or 'probing'}", "INFO")
 
     # ------------------------------------------------------------------ logs
 
@@ -500,6 +583,13 @@ async def _execute(run: AttackRun) -> None:
         run._add_request_event(method, path, status, ms)
 
     if run.engine == "real" and _HAS_REAL_ENGINES:
+        # pre-flight: fail fast with a clear reason when the target is dead
+        try:
+            info = await preflight_check(run.target)
+            run.log(f"✓ Target reachable · HTTP {info['status']} · server: {info['server']}", "OK")
+        except _PreflightError as exc:
+            run.log(f"✗ {exc}", "ERROR")
+            raise
         emulator = UnifiedOffensiveEmulator(target_url=run.target, run_id=run.run_id)
         report = await emulator.run_full_attack(on_phase=on_phase)
     else:

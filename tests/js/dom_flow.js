@@ -156,7 +156,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     modal2 = $("#modal-backdrop").classList.contains("open");
   }
   A(modal2, "fortified run completed");
-  A($("#rep-verdict").textContent.includes("HELD"), "fortified verdict: " + $("#rep-verdict").textContent);
+  A($("#rep-verdict").textContent.includes("DENIED"), "fortified verdict: " + $("#rep-verdict").textContent);
   A(parseInt($("#ns-def").textContent, 10) > 40, "defense blocks counted in network panel (" + $("#ns-def").textContent + ")");
   A($("#rep-defense-section").style.display !== "none", "defense posture section visible");
   A($$("#rep-defense-chips .dchip").length >= 2, "defense type chips present");

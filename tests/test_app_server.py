@@ -86,9 +86,9 @@ def test_demo_telemetry_endpoint(server):
 
 
 def test_attack_lifecycle_with_cursors(server):
-    """Full run through the HTTP API (simulation engine for speed)."""
+    """Full run through the HTTP API against the built-in demo target."""
     run = post(server, "/api/attack/start",
-               {"target": "http://127.0.0.1:1/", "preset": "maximum"})
+               {"target": server + "/demo", "preset": "maximum"})
     rid = run["run_id"]
     assert run["status"] in ("queued", "running")
 

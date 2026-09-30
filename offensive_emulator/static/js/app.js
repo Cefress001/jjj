@@ -382,7 +382,7 @@
     api("/api/attack/" + runId + "/report")
       .then(function (report) {
         if (report && report.summary && report.attack_chain) {
-          if (report.verdict && report.verdict.indexOf("HELD") !== -1) OE_Sound.play("held");
+          if (report.verdict && report.verdict.indexOf("DENIED") !== -1) OE_Sound.play("held");
           else OE_Sound.play("complete");
           openReport(report);
         }

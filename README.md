@@ -31,6 +31,14 @@ Open <http://localhost:8000>, press **LAUNCH CONSOLE**, and fire.
 - **Print-ready reports** — HTML report with print stylesheet + one-click Print/PDF
 - **Verdicts** — "FULL BREACH / BREACH CONTAINED / TARGET HELD" at a glance
 
+**Real-world targeting**
+- **Pre-flight check** — dead targets fail in ~2s with a clear reason (unreachable / TLS / DNS) instead of silently grinding
+- **Browser User-Agent rotation** — real sites and WAFs block the default `aiohttp` fingerprint; every request now carries a realistic browser UA (caller-set UAs preserved)
+- **Real-world timeouts** — engine timeouts raised (3–12s) for real internet latency
+- **429 backoff guard** — rate-limiting targets can no longer stall the exfiltration phase
+- **Liveness heartbeats** — "▸ 40 requests fired · avg 87ms" keeps the terminal alive during long phases
+- **Accurate verdicts** — FULL BREACH / BREACH CONTAINED / ACCESS DENIED based on what actually happened
+
 **Engineering**
 - **Event backbone** — structured phase/request/defense events stream to the UI (cursor-based, like logs)
 - **Request tracing** — one choke-point wrapper on `aiohttp.ClientSession` records every request; presets now pace *real* requests (stealth is actually slow)

@@ -294,11 +294,16 @@ def enrich(report: Dict[str, Any], events: List[Dict[str, Any]]) -> Dict[str, An
     report["defense"] = build_defense_posture(events)
     # verdict line for quick scanning
     chain = report.get("attack_chain", {}) or {}
-    held = not (chain.get("phase_2_exploit") and chain.get("phase_5_exfiltration"))
-    report["verdict"] = (
-        "TARGET HELD — the attack chain was broken before data theft"
-        if held and (report.get("defense", {}) or {}).get("total_blocks", 0) > 0
-        else ("BREACH CONTAINED — foothold gained, exfiltration prevented"
-              if held else "FULL BREACH — the complete kill chain succeeded")
-    )
+    exploited = bool(chain.get("phase_2_exploit"))
+    exfiltrated = bool(chain.get("phase_5_exfiltration"))
+    blocks = (report.get("defense", {}) or {}).get("total_blocks", 0)
+    if exploited and exfiltrated:
+        verdict = "FULL BREACH — the complete kill chain succeeded"
+    elif exploited:
+        verdict = "BREACH CONTAINED — foothold gained, exfiltration prevented"
+    elif blocks:
+        verdict = "ACCESS DENIED — target defenses repelled every attack"
+    else:
+        verdict = "ACCESS DENIED — no exploitation succeeded"
+    report["verdict"] = verdict
     return report

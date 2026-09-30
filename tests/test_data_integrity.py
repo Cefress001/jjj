@@ -16,8 +16,9 @@ def _tracked_files():
 
 def test_no_realistic_secrets():
     """GitHub's secret scanner blocked us once — never again."""
-    forbidden = ("sk_live_", "rk_live_", "ghp_", "github_pat_",
-                 "AKIA4VPAY", "-----BEGIN OPENSSH", "xoxb-", "AIza")
+    # markers are concatenated so this file itself never contains the literals
+    forbidden = ("sk" + "_live_", "rk" + "_live_", "gh" + "p_", "github_" + "pat_",
+                 "AKIA4" + "VPAY", "-----BEGIN OPEN" + "SSH", "xox" + "b-", "AI" + "za")
     for f in _tracked_files():
         p = BASE / f
         if not p.is_file() or p.stat().st_size > 2_000_000:

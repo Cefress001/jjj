@@ -74,7 +74,7 @@ class ReconEngine(ReconModule):
             for path in common_paths:
                 try:
                     url = f"{target}{path}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
                         if resp.status == 200:
                             found.append(path)
                             self.discovered_endpoints.add(path)
@@ -103,7 +103,7 @@ class ReconEngine(ReconModule):
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(target, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(target, timeout=aiohttp.ClientTimeout(total=12)) as resp:
                     headers = resp.headers
 
                     # Detect server
@@ -159,7 +159,7 @@ class ReconEngine(ReconModule):
             for pattern in admin_patterns:
                 try:
                     url = f"{target}{pattern}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                         if resp.status in [200, 403]:
                             hidden.append(pattern)
                             logger.info(f"  ✓ Hidden route: {pattern} ({resp.status})")
@@ -185,7 +185,7 @@ class ReconEngine(ReconModule):
                 # Measure valid endpoint latency
                 import time
                 start = time.time()
-                async with session.get(f"{target}/api/users", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(f"{target}/api/users", timeout=aiohttp.ClientTimeout(total=12)) as resp:
                     baselines["valid_user_latency_ms"] = (time.time() - start) * 1000
                     baselines["response_size_bytes"] = len(await resp.text())
                     if "X-Cache" in resp.headers:
