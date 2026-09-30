@@ -57,6 +57,7 @@ else:
 
 from simulator import SimulationEngine  # noqa: E402
 import remediation  # noqa: E402
+import zap_adapter  # noqa: E402
 
 try:
     from attack_modules.challenge import detect_challenge, challenge_label  # noqa: E402
@@ -65,6 +66,26 @@ except Exception:  # pragma: no cover - flat import fallback
         detect_challenge, challenge_label)
 
 ENGINE_MODE = "real" if _HAS_REAL_ENGINES else "simulation"
+
+
+def available_engines() -> Dict[str, Dict[str, Any]]:
+    """Execution engines exposed to the UI and API."""
+    zap = zap_adapter.availability()
+    return {
+        "simulation": {
+            "name": "Built-in demo", "available": True,
+            "description": "Safe simulated six-phase workflow",
+        },
+        "real": {
+            "name": "Legacy HTTP checks", "available": _HAS_REAL_ENGINES,
+            "description": "App-specific VulnPay checks (requires aiohttp)",
+        },
+        "zap": {
+            "name": "OWASP ZAP baseline", "available": zap["available"],
+            "description": "Real crawl and passive web security analysis",
+            "reason": zap.get("reason"),
+        },
+    }
 
 # ---------------------------------------------------------------------------
 # Phase metadata (keys match the emulator + simulator)
@@ -533,7 +554,14 @@ def start_run(target: str, preset: str = "balanced", engine: Optional[str] = Non
     """Create a run and launch it in a background thread."""
     if not target.startswith(("http://", "https://")):
         target = "http://" + target
-    run = AttackRun(target, preset, engine)
+    selected = engine or ENGINE_MODE
+    engines = available_engines()
+    if selected not in engines:
+        raise ValueError(f"unknown engine '{selected}'")
+    if not engines[selected]["available"]:
+        reason = engines[selected].get("reason") or "engine is not installed"
+        raise ValueError(f"{engines[selected]['name']} unavailable: {reason}")
+    run = AttackRun(target, preset, selected)
     run.thread = threading.Thread(target=_thread_main, args=(run,), daemon=True,
                                   name=f"attack-{run.run_id}")
     _register(run)
@@ -605,7 +633,23 @@ async def _execute(run: AttackRun) -> None:
             raise AttackAborted()
         run._add_request_event(method, path, status, ms)
 
-    if run.engine == "real" and _HAS_REAL_ENGINES:
+    if run.engine == "zap":
+        on_phase("recon", "running")
+        try:
+            report = zap_adapter.run_baseline(
+                run.target, run.run_id, run.log, lambda: run.cancelled,
+            )
+        except InterruptedError as exc:
+            raise AttackAborted() from exc
+        on_phase("recon", "complete")
+        for phase in ("exploit", "persistence", "lateral_movement", "exfiltration", "cover_tracks"):
+            on_phase(phase, "skipped")
+        for finding in report.get("findings", []):
+            run._add_event(
+                "finding", source="zap", severity=finding.get("severity"),
+                name=finding.get("name"), urls=finding.get("urls", [])[:3],
+            )
+    elif run.engine == "real" and _HAS_REAL_ENGINES:
         # pre-flight: fail fast with a clear reason when the target is dead
         try:
             info = await preflight_check(run.target)
@@ -624,8 +668,10 @@ async def _execute(run: AttackRun) -> None:
         sim = SimulationEngine(run.target, run.run_id, run.preset)
         report = await sim.run(on_phase=on_phase, on_log=on_sim_log, on_request=on_sim_request)
 
-    # enrich with MITRE mapping, remediation advice and defense posture
-    report = remediation.enrich(report, run.events)
+    # The ZAP adapter already emits normalized findings and remediation. Legacy
+    # and simulation reports continue through the MITRE enrichment pipeline.
+    if run.engine != "zap":
+        report = remediation.enrich(report, run.events)
     run.report = report
     run.status = "complete"
     run.progress = 100.0

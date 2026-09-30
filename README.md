@@ -53,10 +53,33 @@ Open <http://localhost:8000>, press **LAUNCH CONSOLE**, and fire.
 # no dependencies required — simulation engine
 python run.py                 # → http://localhost:8000
 
-# optional: real HTTP attack engines
+# optional: legacy VulnPay-specific HTTP checks
 pip install aiohttp
 python run.py
 ```
+
+### OWASP ZAP baseline scanning
+
+The console can use an installed [OWASP ZAP](https://www.zaproxy.org/) baseline
+scanner to crawl an authorized website and import real passive-analysis alerts.
+Install ZAP so `zap-baseline.py` is on `PATH`, or point the app to it explicitly:
+
+```bash
+export ZAP_BASELINE_COMMAND="/opt/zaproxy/zap-baseline.py -m 2"
+python run.py
+```
+
+Then select **OWASP ZAP baseline** under **Scan engine**. The adapter streams ZAP
+output, supports cancellation and timeouts, imports its JSON report, and
+normalizes alert severity, confidence, CWE, evidence URLs, and remediation into
+the app's report archive. ZAP exit codes that indicate findings are handled as
+completed scans rather than application failures.
+
+A baseline scan crawls the target and performs passive analysis. It does not run
+ZAP's active scanner, but the crawler still sends real requests. Scan only
+systems you own or have explicit authorization to assess. The ZAP option is
+shown as unavailable when its executable is not installed; simulation remains
+available.
 
 In the console:
 

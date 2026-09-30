@@ -100,7 +100,11 @@
           <button class="diff" data-mode="fortified"><b>FORTIFIED</b><span>target holds</span></button>
         </div>
 
-        <div class="divider">ATTACK PROFILE</div>
+        <div class="divider">SCAN ENGINE</div>
+        <select id="engine-select" class="engine-select" aria-label="Scan engine"></select>
+        <div id="engine-note" class="engine-note"></div>
+
+        <div class="divider">SCAN PROFILE</div>
         <div id="preset-grid" class="preset-grid"></div>
 
         <button id="btn-attack">▶ INITIATE ATTACK</button>
@@ -230,7 +234,7 @@
             <circle class="val" id="ring-arc" cx="59" cy="59" r="48" fill="none" stroke-width="7"/>
           </svg>
           <div class="ring-num" id="ring-num">0%</div>
-          <div class="ring-cap">CHAIN SUCCESS</div>
+          <div class="ring-cap" id="ring-cap">CHAIN SUCCESS</div>
         </div>
         <div class="report-vitals">
           <span class="sev-chip sev-Low" id="rep-sev">SEVERITY: —</span>

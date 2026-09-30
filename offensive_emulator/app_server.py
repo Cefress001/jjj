@@ -175,6 +175,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "version": VERSION,
                 "engine": attack_service.ENGINE_MODE,
                 "real_engines_available": attack_service._HAS_REAL_ENGINES,
+                "engines": attack_service.available_engines(),
                 "demo_target_url": f"http://127.0.0.1:{port}/demo",
                 "time": time.time(),
             })
@@ -184,6 +185,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self._json({
                 "version": VERSION,
                 "engine": attack_service.ENGINE_MODE,
+                "engines": attack_service.available_engines(),
                 "phases": PHASES,
                 "presets": PRESETS,
                 "mitre": remediation.MITRE,
@@ -209,13 +211,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             target = str(data.get("target") or "").strip()
             preset = str(data.get("preset") or "balanced").strip()
+            engine = str(data.get("engine") or attack_service.ENGINE_MODE).strip()
             if not target:
                 self._json({"error": "target is required"}, 400)
                 return
             if preset not in PRESETS:
                 self._json({"error": f"unknown preset '{preset}'"}, 400)
                 return
-            run = start_run(target, preset)
+            try:
+                run = start_run(target, preset, engine=engine)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+                return
             self._json(run.snapshot(), 201)
             return
 
@@ -286,30 +293,45 @@ def render_report_html(report: Dict, print_mode: bool = False) -> str:
         "phase_5_exfiltration": ("Exfiltration", "exfiltration"), "phase_6_cover_tracks": ("Cover Tracks", "cover_tracks"),
     }
     mitre = report.get("mitre", {})
+    is_zap = report.get("engine") == "zap-baseline"
     phase_rows = ""
     for k, v in chain.items():
         label, mkey = phase_labels.get(k, (k, None))
-        techs = mitre.get(mkey, [])
+        techs = [] if is_zap else mitre.get(mkey, [])
         chips = "".join(
             f"<a class='mitre' href='https://attack.mitre.org/techniques/{t['id'].replace('.', '/')}/' "
             f"target='_blank' rel='noopener'>{_esc(t['id'])}</a>" for t in techs)
+        state_label = ("✓ COMPLETED" if v else "— NOT RUN") if is_zap else ("✓ SUCCESS" if v else "✗ FAILED")
         phase_rows += (
             f"<tr><td>{_esc(label)}</td>"
-            f"<td class='{'ok' if v else 'bad'}'>{'✓ SUCCESS' if v else '✗ FAILED'}</td>"
+            f"<td class='{'ok' if v else ('skip' if is_zap else 'bad')}'>{state_label}</td>"
             f"<td class='techs'>{chips}</td></tr>"
         )
 
     findings = "".join(f"<li>{_esc(f)}</li>" for f in summ.get("key_findings", []))
-    stats = [
-        ("Endpoints discovered", report.get("recon_results", {}).get("endpoints_discovered", 0)),
-        ("Exploit methods", ", ".join(report.get("exploit_results", {}).get("methods", [])) or "—"),
-        ("Backdoors installed", report.get("persistence_results", {}).get("backdoors_installed", 0)),
-        ("Credentials extracted", report.get("lateral_movement_results", {}).get("credentials_extracted", 0)),
-        ("Records stolen", report.get("exfiltration_results", {}).get("records_stolen", 0)),
-        ("Data exfiltrated", f"{report.get('exfiltration_results', {}).get('data_exfiltrated_mb', 0):.2f} MB"),
-        ("Logs deleted", report.get("cover_tracks_results", {}).get("logs_deleted", 0)),
-        ("Total time", f"{report.get('total_time_seconds', 0):.2f}s"),
-    ]
+    if is_zap:
+        risks = summ.get("alerts_by_risk", {}) or {}
+        stats = [
+            ("Total alerts", summ.get("alerts_total", 0)),
+            ("High", risks.get("High", 0)),
+            ("Medium", risks.get("Medium", 0)),
+            ("Low", risks.get("Low", 0)),
+            ("Informational", risks.get("Informational", 0)),
+            ("Affected URLs", report.get("recon_results", {}).get("endpoints_discovered", 0)),
+            ("Scan type", "ZAP baseline"),
+            ("Total time", f"{report.get('total_time_seconds', 0):.2f}s"),
+        ]
+    else:
+        stats = [
+            ("Endpoints discovered", report.get("recon_results", {}).get("endpoints_discovered", 0)),
+            ("Exploit methods", ", ".join(report.get("exploit_results", {}).get("methods", [])) or "—"),
+            ("Backdoors installed", report.get("persistence_results", {}).get("backdoors_installed", 0)),
+            ("Credentials extracted", report.get("lateral_movement_results", {}).get("credentials_extracted", 0)),
+            ("Records stolen", report.get("exfiltration_results", {}).get("records_stolen", 0)),
+            ("Data exfiltrated", f"{report.get('exfiltration_results', {}).get('data_exfiltrated_mb', 0):.2f} MB"),
+            ("Logs deleted", report.get("cover_tracks_results", {}).get("logs_deleted", 0)),
+            ("Total time", f"{report.get('total_time_seconds', 0):.2f}s"),
+        ]
     stat_tiles = "".join(f"<div class='tile'><div class='v'>{_esc(v)}</div><div class='k'>{_esc(k)}</div></div>"
                          for k, v in stats)
 
@@ -337,6 +359,7 @@ def render_report_html(report: Dict, print_mode: bool = False) -> str:
 
     verdict = report.get("verdict", "")
     verdict_html = (f"<div class='verdict'>{_esc(verdict)}</div>" if verdict else "")
+    workflow_heading = "Scan workflow" if is_zap else "Attack chain · MITRE ATT&CK"
     print_script = "<script>window.addEventListener('load',function(){setTimeout(function(){window.print()},250)})</script>" if print_mode else ""
 
     return f"""<!doctype html>
@@ -363,6 +386,7 @@ def render_report_html(report: Dict, print_mode: bool = False) -> str:
  table {{ width:100%; border-collapse:collapse; font-size:14px; }}
  td {{ padding:8px 10px; border-bottom:1px solid #14203c; vertical-align:top; }}
  td.ok {{ color:#34d399; font-weight:600; white-space:nowrap; }} td.bad {{ color:#f43f5e; font-weight:600; white-space:nowrap; }}
+ td.skip {{ color:#7d8db0; font-weight:600; white-space:nowrap; }}
  td.techs {{ text-align:right; }}
  .mitre {{ display:inline-block; margin:1px 0 1px 4px; padding:2px 7px; border-radius:6px; font-size:11px;
           font-family:ui-monospace,monospace; color:#a5f3fc; background:rgba(34,211,238,.09);
@@ -407,7 +431,7 @@ def render_report_html(report: Dict, print_mode: bool = False) -> str:
  <div class="sev">SEVERITY: {_esc(sev)} · SUCCESS RATE {_esc(summ.get('attack_success_rate', '?'))}</div>
  {verdict_html}
  <div class="grid">{stat_tiles}</div>
- <section><h2>Attack chain · MITRE ATT&amp;CK</h2><table>{phase_rows}</table></section>
+ <section><h2>{workflow_heading}</h2><table>{phase_rows}</table></section>
  {defense_section}
  <section><h2>Key findings</h2><ul>{findings}</ul></section>
  {recs_section}

@@ -31,6 +31,7 @@
   var state = {
     config: null,
     preset: "balanced",
+    engine: null,
     difficulty: "easy",
     runId: null,
     running: false,
@@ -166,6 +167,30 @@
       var le = $("#landing-engine");
       if (le) le.textContent = cfg.engine === "real" ? "REAL" : "SIMULATION";
 
+      var engineSelect = $("#engine-select");
+      var engines = cfg.engines || {};
+      state.engine = state.engine || cfg.engine || "simulation";
+      engineSelect.innerHTML = "";
+      Object.keys(engines).forEach(function (key) {
+        var info = engines[key];
+        var option = document.createElement("option");
+        option.value = key;
+        option.disabled = !info.available;
+        option.textContent = info.name + (info.available ? "" : " — unavailable");
+        option.selected = key === state.engine;
+        engineSelect.appendChild(option);
+      });
+      function updateEngineNote() {
+        state.engine = engineSelect.value;
+        var info = engines[state.engine] || {};
+        $("#engine-note").textContent = info.description || info.reason || "";
+      }
+      engineSelect.addEventListener("change", function () {
+        if (state.running) { engineSelect.value = state.engine; return; }
+        updateEngineNote();
+      });
+      updateEngineNote();
+
       var grid = $("#preset-grid");
       grid.innerHTML = "";
       Object.keys(cfg.presets).forEach(function (key) {
@@ -239,7 +264,7 @@
     api("/api/attack/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: target, preset: state.preset })
+      body: JSON.stringify({ target: target, preset: state.preset, engine: state.engine })
     }).then(function (run) {
       state.runId = run.run_id;
       state.running = true;
@@ -706,21 +731,25 @@
     $("#rep-verdict").textContent = report.verdict || "";
     $("#rep-v-target").textContent = report.target;
     $("#rep-v-run").textContent = report.run_id;
-    $("#rep-v-engine").textContent = report.engine === "real" ? "real HTTP engines" : "simulation";
+    $("#rep-v-engine").textContent = report.engine === "real" ? "legacy HTTP checks" :
+      (report.engine === "zap-baseline" ? "OWASP ZAP baseline" : "simulation");
     $("#rep-v-time").textContent = (report.total_time_seconds || 0).toFixed(2) + "s · " +
       new Date(report.timestamp || Date.now()).toLocaleString();
 
     // success ring
+    var isZap = report.engine === "zap-baseline";
     var pct = parseFloat(s.attack_success_rate) || 0;
     var C = 2 * Math.PI * 48;
     var arc = $("#ring-arc");
     arc.style.strokeDasharray = C.toFixed(1);
     arc.style.strokeDashoffset = C.toFixed(1);
-    $("#ring-num").textContent = "0%";
+    $("#ring-num").textContent = isZap ? "0" : "0%";
+    $("#ring-cap").textContent = isZap ? "ALERTS FOUND" : "CHAIN SUCCESS";
     setTimeout(function () {
-      arc.style.strokeDashoffset = (C * (1 - pct / 100)).toFixed(1);
+      arc.style.strokeDashoffset = isZap ? (s.alerts_total ? 0 : C.toFixed(1)) : (C * (1 - pct / 100)).toFixed(1);
     }, 80);
-    countUp($("#ring-num"), pct, { dec: 0, suffix: "%", dur: 1100 });
+    countUp($("#ring-num"), isZap ? (s.alerts_total || 0) : pct,
+      { dec: 0, suffix: isZap ? "" : "%", dur: 1100 });
 
     // chain + MITRE chips
     var mitre = (state.config && state.config.mitre) || report.mitre || {};
@@ -794,16 +823,31 @@
     var rr = report.recon_results || {}, er = report.exploit_results || {},
         pr = report.persistence_results || {}, lr = report.lateral_movement_results || {},
         xr = report.exfiltration_results || {}, cr = report.cover_tracks_results || {};
-    var tiles = [
-      [rr.endpoints_discovered || 0, "endpoints"],
-      [(er.methods || []).length, "exploits"],
-      [pr.backdoors_installed || 0, "backdoors"],
-      [lr.credentials_extracted || 0, "credentials"],
-      [xr.records_stolen || 0, "records stolen"],
-      [(xr.data_exfiltrated_mb || 0).toFixed(2) + " MB", "exfiltrated"],
-      [cr.logs_deleted || 0, "logs deleted"],
-      [(report.total_time_seconds || 0).toFixed(1) + "s", "duration"]
-    ];
+    var tiles;
+    if (report.engine === "zap-baseline") {
+      var risks = s.alerts_by_risk || {};
+      tiles = [
+        [s.alerts_total || 0, "alerts"],
+        [risks.High || 0, "high"],
+        [risks.Medium || 0, "medium"],
+        [risks.Low || 0, "low"],
+        [risks.Informational || 0, "informational"],
+        [rr.endpoints_discovered || 0, "affected URLs"],
+        ["baseline", "scan type"],
+        [(report.total_time_seconds || 0).toFixed(1) + "s", "duration"]
+      ];
+    } else {
+      tiles = [
+        [rr.endpoints_discovered || 0, "endpoints"],
+        [(er.methods || []).length, "exploits"],
+        [pr.backdoors_installed || 0, "backdoors"],
+        [lr.credentials_extracted || 0, "credentials"],
+        [xr.records_stolen || 0, "records stolen"],
+        [(xr.data_exfiltrated_mb || 0).toFixed(2) + " MB", "exfiltrated"],
+        [cr.logs_deleted || 0, "logs deleted"],
+        [(report.total_time_seconds || 0).toFixed(1) + "s", "duration"]
+      ];
+    }
     var tileBox = $("#rep-tiles");
     tileBox.innerHTML = "";
     tiles.forEach(function (t) {
