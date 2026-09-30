@@ -167,6 +167,31 @@ def test_soft404_spa_completes_without_crash(svc, fake_site):
         assert key in run.report
 
 
+def test_soft404_site_zero_false_positives(svc, fake_site):
+    """THE real-world test: a catch-all site (every path -> homepage 200).
+
+    Like www.regencycaregroup.com: unknown paths serve the homepage with 200.
+    The tool must NOT report fake endpoints, fake exploits, fake backdoors,
+    fake file theft or fake log deletion.
+    """
+    base, handler = fake_site
+    handler.behavior = "soft200"
+    run = svc.start_run(base, "maximum", engine="real")
+    _wait(run, timeout=180)
+    assert run.status == "complete"
+    rep = run.report
+    assert rep["recon_results"]["endpoints_discovered"] == 0, \
+        f"soft-404 produced fake endpoints: {rep['recon_results']['endpoints']}"
+    assert rep["attack_chain"]["phase_2_exploit"] is False, "soft-404 faked an exploit"
+    assert rep["persistence_results"]["backdoors_installed"] == 0, "soft-404 faked a backdoor"
+    assert rep["exfiltration_results"]["records_stolen"] == 0, "soft-404 faked data theft"
+    assert rep["exfiltration_results"]["data_exfiltrated_mb"] == 0.0, "soft-404 faked file theft"
+    assert rep["cover_tracks_results"]["logs_deleted"] == 0, "soft-404 faked log deletion"
+    assert "DENIED" in rep["verdict"]
+    logs = " ".join(e["msg"] for e in run.logs)
+    assert "Soft-404 catch-all detected" in logs, "recon should announce the catch-all"
+
+
 def test_rate_limited_export_finishes_quickly(svc, fake_site):
     """A 429-on-everything export endpoint must not stall the run."""
     base, handler = fake_site

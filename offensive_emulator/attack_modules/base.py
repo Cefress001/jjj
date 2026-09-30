@@ -47,6 +47,10 @@ class AttackContext:
     artifacts_removed: int = 0
     traces_visible: bool = True
 
+    # Real-world targeting: signature of a soft-404 catch-all page, probed
+    # during recon and consulted by every later phase (see soft404.py).
+    soft404_signature: Optional[Dict[str, Any]] = None
+
     # Attack timeline
     start_time: datetime = field(default_factory=datetime.now)
     phase_timings: Dict[str, float] = field(default_factory=dict)

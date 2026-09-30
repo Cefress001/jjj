@@ -113,7 +113,14 @@ class _RunLogHandler(logging.Handler):
 
 
 _log_handler = _RunLogHandler()
-logging.getLogger().addHandler(_log_handler)
+
+# Attach the capture handler directly to the engine logger trees with explicit
+# levels — independent of whatever the root logger's level is (web framework,
+# pytest, or an embedding app may all manipulate the root logger).
+for _name in _ENGINE_PREFIXES:
+    _lg = logging.getLogger(_name)
+    _lg.setLevel(logging.INFO)
+    _lg.addHandler(_log_handler)
 
 # Keep the server console quiet — attack logs stream to the web UI instead.
 _root = logging.getLogger()

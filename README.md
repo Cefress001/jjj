@@ -33,6 +33,7 @@ Open <http://localhost:8000>, press **LAUNCH CONSOLE**, and fire.
 
 **Real-world targeting**
 - **Pre-flight check** — dead targets fail in ~2s with a clear reason (unreachable / TLS / DNS) instead of silently grinding
+- **Soft-404 detection** — many real sites serve the homepage for every unknown path (verified on a live target); the emulator probes a baseline once and filters catch-all responses so reports never contain fake endpoints/exploits/backdoors
 - **Browser User-Agent rotation** — real sites and WAFs block the default `aiohttp` fingerprint; every request now carries a realistic browser UA (caller-set UAs preserved)
 - **Real-world timeouts** — engine timeouts raised (3–12s) for real internet latency
 - **429 backoff guard** — rate-limiting targets can no longer stall the exfiltration phase

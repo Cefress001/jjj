@@ -8,6 +8,7 @@ import aiohttp
 from typing import Dict, List, Any, Optional, Set
 import logging
 from .base import ReconModule
+from .soft404 import probe_baseline, is_soft404
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,19 @@ class ReconEngine(ReconModule):
         self.discovered_endpoints: Set[str] = set()
         self.tech_stack: Dict[str, str] = {}
         self.response_patterns: Dict[str, Any] = {}
+        self._sig = None   # soft-404 baseline signature
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute full reconnaissance phase and update context"""
         logger.info(f"[Recon] Starting reconnaissance on {context.target_url}")
+
+        # Real-world sites often soft-404 every unknown path to the homepage.
+        # Probe once; the signature filters false discoveries in every phase.
+        context.soft404_signature = await probe_baseline(context.target_url)
+        self._sig = context.soft404_signature
+        if context.soft404_signature:
+            logger.info("[Recon] Soft-404 catch-all detected — homepage mirror "
+                        "responses will be filtered from discovery")
 
         results = await asyncio.gather(
             self._enumerate_endpoints(context.target_url),
@@ -76,6 +86,11 @@ class ReconEngine(ReconModule):
                     url = f"{target}{path}"
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
                         if resp.status == 200:
+                            body = await resp.text(errors="replace")
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""),
+                                          self._sig):
+                                continue   # homepage mirror, not a real endpoint
                             found.append(path)
                             self.discovered_endpoints.add(path)
                             logger.info(f"  ✓ Found: {path} (200)")
@@ -161,6 +176,12 @@ class ReconEngine(ReconModule):
                     url = f"{target}{pattern}"
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                         if resp.status in [200, 403]:
+                            if resp.status == 200:
+                                body = await resp.text(errors="replace")
+                                if is_soft404(resp.status, body,
+                                              resp.headers.get("Content-Type", ""),
+                                              self._sig):
+                                    continue   # homepage mirror
                             hidden.append(pattern)
                             logger.info(f"  ✓ Hidden route: {pattern} ({resp.status})")
                 except:
