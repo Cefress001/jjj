@@ -158,13 +158,17 @@
       state.config = cfg;
 
       var badge = $("#engine-badge");
-      badge.textContent = cfg.engine === "real" ? "◈ ENGINE: REAL" : "◈ ENGINE: SIMULATION";
-      badge.className = "engine-badge " + (cfg.engine === "real" ? "real" : "sim");
-      badge.title = cfg.engine === "real"
-        ? "Real HTTP attack engines active (aiohttp detected)"
-        : "Simulation mode — install aiohttp for real HTTP engines";
+      var scannerCount = Object.keys(cfg.scanners || {}).filter(function (key) {
+        return cfg.scanners[key].available;
+      }).length;
+      badge.textContent = scannerCount ? "◈ PIPELINE: " + scannerCount + " TOOLS" :
+        (cfg.engine === "real" ? "◈ ENGINE: REAL" : "◈ ENGINE: SIMULATION");
+      badge.className = "engine-badge " + ((scannerCount || cfg.engine === "real") ? "real" : "sim");
+      badge.title = scannerCount
+        ? "Installed scanners run automatically and merge into one report"
+        : (cfg.engine === "real" ? "Real HTTP workflow active" : "Simulation mode");
       var le = $("#landing-engine");
-      if (le) le.textContent = cfg.engine === "real" ? "REAL" : "SIMULATION";
+      if (le) le.textContent = scannerCount ? "MULTI-TOOL" : (cfg.engine === "real" ? "REAL" : "SIMULATION");
 
       var grid = $("#preset-grid");
       grid.innerHTML = "";
@@ -706,21 +710,27 @@
     $("#rep-verdict").textContent = report.verdict || "";
     $("#rep-v-target").textContent = report.target;
     $("#rep-v-run").textContent = report.run_id;
-    $("#rep-v-engine").textContent = report.engine === "real" ? "real HTTP engines" : "simulation";
+    var engineText = report.engine === "real" ? "real HTTP workflow" :
+      (report.engine === "zap-baseline" ? "OWASP ZAP baseline" : "simulation");
+    if ((report.tools_run || []).length) engineText += " + " + report.tools_run.join(", ");
+    $("#rep-v-engine").textContent = engineText;
     $("#rep-v-time").textContent = (report.total_time_seconds || 0).toFixed(2) + "s · " +
       new Date(report.timestamp || Date.now()).toLocaleString();
 
     // success ring
+    var isZap = report.engine === "zap-baseline";
     var pct = parseFloat(s.attack_success_rate) || 0;
     var C = 2 * Math.PI * 48;
     var arc = $("#ring-arc");
     arc.style.strokeDasharray = C.toFixed(1);
     arc.style.strokeDashoffset = C.toFixed(1);
-    $("#ring-num").textContent = "0%";
+    $("#ring-num").textContent = isZap ? "0" : "0%";
+    $("#ring-cap").textContent = isZap ? "ALERTS FOUND" : "CHAIN SUCCESS";
     setTimeout(function () {
-      arc.style.strokeDashoffset = (C * (1 - pct / 100)).toFixed(1);
+      arc.style.strokeDashoffset = isZap ? (s.alerts_total ? 0 : C.toFixed(1)) : (C * (1 - pct / 100)).toFixed(1);
     }, 80);
-    countUp($("#ring-num"), pct, { dec: 0, suffix: "%", dur: 1100 });
+    countUp($("#ring-num"), isZap ? (s.alerts_total || 0) : pct,
+      { dec: 0, suffix: isZap ? "" : "%", dur: 1100 });
 
     // chain + MITRE chips
     var mitre = (state.config && state.config.mitre) || report.mitre || {};
@@ -794,16 +804,32 @@
     var rr = report.recon_results || {}, er = report.exploit_results || {},
         pr = report.persistence_results || {}, lr = report.lateral_movement_results || {},
         xr = report.exfiltration_results || {}, cr = report.cover_tracks_results || {};
-    var tiles = [
-      [rr.endpoints_discovered || 0, "endpoints"],
-      [(er.methods || []).length, "exploits"],
-      [pr.backdoors_installed || 0, "backdoors"],
-      [lr.credentials_extracted || 0, "credentials"],
-      [xr.records_stolen || 0, "records stolen"],
-      [(xr.data_exfiltrated_mb || 0).toFixed(2) + " MB", "exfiltrated"],
-      [cr.logs_deleted || 0, "logs deleted"],
-      [(report.total_time_seconds || 0).toFixed(1) + "s", "duration"]
-    ];
+    var tiles;
+    if (report.engine === "zap-baseline") {
+      var risks = s.alerts_by_risk || {};
+      tiles = [
+        [s.alerts_total || 0, "alerts"],
+        [risks.High || 0, "high"],
+        [risks.Medium || 0, "medium"],
+        [risks.Low || 0, "low"],
+        [risks.Informational || 0, "informational"],
+        [rr.endpoints_discovered || 0, "affected URLs"],
+        ["baseline", "scan type"],
+        [(report.total_time_seconds || 0).toFixed(1) + "s", "duration"]
+      ];
+    } else {
+      tiles = [
+        [rr.endpoints_discovered || 0, "endpoints"],
+        [s.scanner_findings || 0, "scanner findings"],
+        [(er.methods || []).length, "exploits"],
+        [pr.backdoors_installed || 0, "backdoors"],
+        [lr.credentials_extracted || 0, "credentials"],
+        [xr.records_stolen || 0, "records stolen"],
+        [(xr.data_exfiltrated_mb || 0).toFixed(2) + " MB", "exfiltrated"],
+        [cr.logs_deleted || 0, "logs deleted"],
+        [(report.total_time_seconds || 0).toFixed(1) + "s", "duration"]
+      ];
+    }
     var tileBox = $("#rep-tiles");
     tileBox.innerHTML = "";
     tiles.forEach(function (t) {

@@ -57,6 +57,7 @@ else:
 
 from simulator import SimulationEngine  # noqa: E402
 import remediation  # noqa: E402
+import scanner_pipeline  # noqa: E402
 
 try:
     from attack_modules.challenge import detect_challenge, challenge_label  # noqa: E402
@@ -65,6 +66,14 @@ except Exception:  # pragma: no cover - flat import fallback
         detect_challenge, challenge_label)
 
 ENGINE_MODE = "real" if _HAS_REAL_ENGINES else "simulation"
+
+
+def available_engines() -> Dict[str, Dict[str, Any]]:
+    """Core engines; supplemental scanners are automatic, not alternatives."""
+    return {
+        "simulation": {"name": "Built-in workflow", "available": True},
+        "real": {"name": "HTTP workflow", "available": _HAS_REAL_ENGINES},
+    }
 
 # ---------------------------------------------------------------------------
 # Phase metadata (keys match the emulator + simulator)
@@ -442,10 +451,12 @@ class AttackRun:
             elif key == self.current_phase and state != "running":
                 self.current_phase = None
             idx = [p["key"] for p in PHASES].index(key)
+            # Reserve the final 20% for the automatic supplemental scanners.
+            # This keeps progress honest after the six core phases complete.
             if state == "running":
-                self.progress = max(self.progress, idx / len(PHASES) * 100.0)
+                self.progress = max(self.progress, idx / len(PHASES) * 80.0)
             elif state in ("complete", "failed", "skipped"):
-                self.progress = max(self.progress, (idx + 1) / len(PHASES) * 100.0)
+                self.progress = max(self.progress, (idx + 1) / len(PHASES) * 80.0)
         self._add_event("phase", phase=key, state=state)
 
     def cancel(self) -> bool:
@@ -533,7 +544,14 @@ def start_run(target: str, preset: str = "balanced", engine: Optional[str] = Non
     """Create a run and launch it in a background thread."""
     if not target.startswith(("http://", "https://")):
         target = "http://" + target
-    run = AttackRun(target, preset, engine)
+    selected = engine or ENGINE_MODE
+    engines = available_engines()
+    if selected not in engines:
+        raise ValueError(f"unknown engine '{selected}'")
+    if not engines[selected]["available"]:
+        reason = engines[selected].get("reason") or "engine is not installed"
+        raise ValueError(f"{engines[selected]['name']} unavailable: {reason}")
+    run = AttackRun(target, preset, selected)
     run.thread = threading.Thread(target=_thread_main, args=(run,), daemon=True,
                                   name=f"attack-{run.run_id}")
     _register(run)
@@ -624,8 +642,21 @@ async def _execute(run: AttackRun) -> None:
         sim = SimulationEngine(run.target, run.run_id, run.preset)
         report = await sim.run(on_phase=on_phase, on_log=on_sim_log, on_request=on_sim_request)
 
-    # enrich with MITRE mapping, remediation advice and defense posture
     report = remediation.enrich(report, run.events)
+
+    # Every installed scanner augments the same run and report. Scanner errors
+    # are isolated so one unavailable integration never discards core results.
+    try:
+        def on_scanner_progress(done: int, total: int) -> None:
+            run.progress = max(run.progress, 80.0 + (done / max(1, total)) * 19.0)
+            run._add_event("scanner_progress", completed=done, total=total)
+
+        scanner_results = scanner_pipeline.run_installed(
+            run.target, run.preset, run.run_id, run.log, lambda: run.cancelled,
+            on_scanner_progress)
+    except InterruptedError as exc:
+        raise AttackAborted() from exc
+    report = scanner_pipeline.merge(report, scanner_results, run._add_event)
     run.report = report
     run.status = "complete"
     run.progress = 100.0

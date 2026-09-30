@@ -41,7 +41,8 @@ def test_health(server):
 
 def test_configs_payload(server):
     d = get(server, "/api/configs")
-    assert {"phases", "presets", "mitre", "demo_targets"} <= set(d)
+    assert {"phases", "presets", "mitre", "demo_targets", "scanners"} <= set(d)
+    assert set(d["scanners"]) == {"httpx", "katana", "browser", "zap", "nuclei"}
     assert set(d["demo_targets"]) == {"easy", "hardened", "fortified"}
     assert len(d["phases"]) == 6
     assert set(d["presets"]) == {"stealth", "balanced", "aggressive", "maximum"}
@@ -113,6 +114,8 @@ def test_attack_lifecycle_with_cursors(server):
     # report + downloads
     rep = get(server, f"/api/attack/{rid}/report")
     assert "mitre" in rep and "recommendations" in rep and "verdict" in rep
+    assert rep["endpoint_corpus"]["accepted"] >= 1
+    assert rep["scanner_results"]["endpoint_corpus"]["primary_url"].startswith("http")
     with urllib.request.urlopen(server + f"/api/attack/{rid}/report.html?print=1", timeout=10) as r:
         html = r.read().decode()
         assert "MITRE ATT" in html and "window.print" in html
