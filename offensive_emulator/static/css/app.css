@@ -478,15 +478,6 @@ input, .terminal, .chip { user-select: text; }
 }
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 
-.engine-select {
-  width: 100%; padding: 10px 12px; border: 1px solid var(--line);
-  border-radius: 5px; color: var(--cyan); background: rgba(2, 10, 20, .92);
-  font: 700 11px/1.2 var(--mono); letter-spacing: .04em; outline: none;
-}
-.engine-select:focus { border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(34, 211, 238, .1); }
-.engine-select option:disabled { color: var(--faint); }
-.engine-note { color: var(--muted); font: 10px/1.45 var(--mono); margin-top: 6px; min-height: 14px; }
-
 .preset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 
 .preset {
