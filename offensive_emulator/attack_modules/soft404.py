@@ -19,13 +19,18 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
+from .challenge import detect_challenge
+
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 
 
-async def probe_baseline(target: str) -> Optional[Dict[str, Any]]:
+async def probe_baseline(target: str) -> Dict[str, Optional[Any]]:
     """
-    Fetch a path that cannot exist. Returns its 200-signature (this target
-    has a soft-404 catch-all) or None (normal 404 behaviour — nothing to do).
+    Fetch a path that cannot exist and classify the response:
+
+      {"soft404":  sig,  "challenge": None}   catch-all: 200 homepage mirror
+      {"soft404":  None, "challenge": ch}     WAF challenge/interstitial page
+      {"soft404":  None, "challenge": None}   normal 404 behaviour — nothing to do
     """
     path = f"/no-such-path-{secrets.token_hex(8)}"
     try:
@@ -35,20 +40,26 @@ async def probe_baseline(target: str) -> Optional[Dict[str, Any]]:
                 timeout=aiohttp.ClientTimeout(total=12),
                 allow_redirects=True,
             ) as resp:
-                if resp.status != 200:
-                    return None
                 body = await resp.text(errors="replace")
-                if not body:
-                    return None
+                # A WAF challenge page is NOT a catch-all: the app was never
+                # reached. It wins — the run is being intercepted.
+                ch = detect_challenge(resp.status, resp.headers, body)
+                if ch:
+                    return {"soft404": None, "challenge": ch}
+                if resp.status != 200 or not body:
+                    return {"soft404": None, "challenge": None}
                 m = _TITLE_RE.search(body)
                 return {
-                    "len": len(body),
-                    "hash": hashlib.sha256(body.encode("utf-8", "replace")).hexdigest(),
-                    "ct": (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower(),
-                    "title": (m.group(1).strip()[:120] if m else ""),
+                    "soft404": {
+                        "len": len(body),
+                        "hash": hashlib.sha256(body.encode("utf-8", "replace")).hexdigest(),
+                        "ct": (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower(),
+                        "title": (m.group(1).strip()[:120] if m else ""),
+                    },
+                    "challenge": None,
                 }
     except Exception:
-        return None
+        return {"soft404": None, "challenge": None}
 
 
 def is_soft404(status: int, body: str, content_type: str,

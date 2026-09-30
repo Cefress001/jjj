@@ -34,6 +34,7 @@ Open <http://localhost:8000>, press **LAUNCH CONSOLE**, and fire.
 **Real-world targeting**
 - **Pre-flight check** — dead targets fail in ~2s with a clear reason (unreachable / TLS / DNS) instead of silently grinding
 - **Soft-404 detection** — many real sites serve the homepage for every unknown path (verified on a live target); the emulator probes a baseline once and filters catch-all responses so reports never contain fake endpoints/exploits/backdoors
+- **Cloudflare challenge labeling** — WAF interstitials ("Just a moment…", Under-Attack mode, error-1020 WAF blocks, 1015 rate limits) are detected via the official `cf-mitigated` header and page fingerprints, and labeled distinctly: a challenge 403 is never counted as a "protected endpoint", the report carries a `waf` section (`provider` / `kind` / `requests_intercepted`), the log stream says so from preflight to the closing summary, and the WAF gets defense credit in the verdict
 - **Browser User-Agent rotation** — real sites and WAFs block the default `aiohttp` fingerprint; every request now carries a realistic browser UA (caller-set UAs preserved)
 - **Real-world timeouts** — engine timeouts raised (3–12s) for real internet latency
 - **429 backoff guard** — rate-limiting targets can no longer stall the exfiltration phase
@@ -43,7 +44,7 @@ Open <http://localhost:8000>, press **LAUNCH CONSOLE**, and fire.
 **Engineering**
 - **Event backbone** — structured phase/request/defense events stream to the UI (cursor-based, like logs)
 - **Request tracing** — one choke-point wrapper on `aiohttp.ClientSession` records every request; presets now pace *real* requests (stealth is actually slow)
-- **Test suite** — `pytest` (41 tests) + a jsdom DOM integration test driving the real UI
+- **Test suite** — `pytest` (66 tests) + a jsdom DOM integration test driving the real UI
 - **Dockerfile** — `docker build -t offensive-emulator . && docker run -p 8000:8000 offensive-emulator`
 
 ## Quick start

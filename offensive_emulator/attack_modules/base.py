@@ -51,6 +51,13 @@ class AttackContext:
     # during recon and consulted by every later phase (see soft404.py).
     soft404_signature: Optional[Dict[str, Any]] = None
 
+    # Real-world targeting: WAF challenge interception (e.g. Cloudflare
+    # "Just a moment..." pages), detected during recon and counted by every
+    # phase (see challenge.py). Labeled distinctly in reports — a challenge
+    # page is not a soft-404 and never counts as a success.
+    waf_challenge: Optional[Dict[str, Any]] = None
+    waf_interceptions: int = 0
+
     # Attack timeline
     start_time: datetime = field(default_factory=datetime.now)
     phase_timings: Dict[str, float] = field(default_factory=dict)

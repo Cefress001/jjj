@@ -58,6 +58,12 @@ else:
 from simulator import SimulationEngine  # noqa: E402
 import remediation  # noqa: E402
 
+try:
+    from attack_modules.challenge import detect_challenge, challenge_label  # noqa: E402
+except Exception:  # pragma: no cover - flat import fallback
+    from offensive_emulator.attack_modules.challenge import (  # type: ignore
+        detect_challenge, challenge_label)
+
 ENGINE_MODE = "real" if _HAS_REAL_ENGINES else "simulation"
 
 # ---------------------------------------------------------------------------
@@ -185,10 +191,17 @@ async def preflight_check(target: str) -> Dict[str, Any]:
                     allow_redirects=True,
                     headers={"User-Agent": random.choice(_USER_AGENTS)},
                 ) as resp:
+                    challenge = None
+                    try:
+                        body = await resp.text(errors="replace")
+                        challenge = detect_challenge(resp.status, resp.headers, body)
+                    except Exception:
+                        pass
                     return {
                         "status": resp.status,
                         "server": resp.headers.get("Server", "unknown"),
                         "final_url": str(resp.url),
+                        "challenge": challenge,
                     }
         except Exception as exc:
             last_err = exc
@@ -251,6 +264,9 @@ def _install_request_tracer() -> bool:
                 defense = None
                 try:
                     defense = resp.headers.get("X-Defense") or None
+                    if defense is None and \
+                            (resp.headers.get("CF-Mitigated") or "").strip().lower() == "challenge":
+                        defense = "cloudflare_waf"   # official Cloudflare signal
                 except Exception:
                     pass
                 try:
@@ -594,6 +610,11 @@ async def _execute(run: AttackRun) -> None:
         try:
             info = await preflight_check(run.target)
             run.log(f"✓ Target reachable · HTTP {info['status']} · server: {info['server']}", "OK")
+            ch = info.get("challenge")
+            if ch:
+                run.log(f"⚠ Cloudflare {challenge_label(ch)} on the homepage — the WAF is "
+                        f"intercepting this client. Results below will reflect WAF "
+                        f"responses, not the application.", "WARN")
         except _PreflightError as exc:
             run.log(f"✗ {exc}", "ERROR")
             raise
@@ -619,6 +640,10 @@ async def _execute(run: AttackRun) -> None:
     if defense.get("total_blocks"):
         run.log(f"  defenses engaged: {defense['total_blocks']} blocks "
                 f"({', '.join(f'{k}×{v}' for k, v in defense['by_type'].items())})", "WARN")
+    waf = report.get("waf")
+    if waf:
+        run.log(f"  WAF: {waf.get('provider', 'unknown')} — {waf.get('requests_intercepted', 0)} requests "
+                f"intercepted (challenge pages, not application responses)", "WARN")
     run.log("═" * 62, "PHASE")
 
 

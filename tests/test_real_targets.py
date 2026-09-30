@@ -31,7 +31,7 @@ def _wait(run, timeout=120):
 
 class _RecordingHandler(BaseHTTPRequestHandler):
     """Configurable fake 'real website'. Records User-Agents seen."""
-    behavior = "notfound"     # notfound | soft200 | ratelimit
+    behavior = "notfound"     # notfound | soft200 | ratelimit | challenge
     seen_uas = []
 
     def log_message(self, *a):
@@ -44,6 +44,20 @@ class _RecordingHandler(BaseHTTPRequestHandler):
             body = b"<html><body>welcome</body></html>"
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif b == "challenge":
+            # Cloudflare managed challenge: 403 interstitial on EVERY path,
+            # official cf-mitigated header + challenge-platform script.
+            body = (b"<!DOCTYPE html><html><head><title>Just a moment...</title>"
+                    b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate.js'>"
+                    b"</script></head><body>Verify you are human...</body></html>")
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Server", "cloudflare")
+            self.send_header("CF-RAY", "8f3e2b1c4a9d1234-LAX")
+            self.send_header("cf-mitigated", "challenge")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -190,6 +204,59 @@ def test_soft404_site_zero_false_positives(svc, fake_site):
     assert "DENIED" in rep["verdict"]
     logs = " ".join(e["msg"] for e in run.logs)
     assert "Soft-404 catch-all detected" in logs, "recon should announce the catch-all"
+
+
+def test_cloudflare_challenge_site_labeled_honestly(svc, fake_site):
+    """THE WAF test: Cloudflare challenges every request (403 interstitial).
+
+    Before challenge detection this reported ~39 fake "endpoints"/"hidden
+    routes" (every 403 was "Protected") — the tool must instead report
+    nothing found, label the WAF distinctly, and credit it with the blocks.
+    """
+    base, handler = fake_site
+    handler.behavior = "challenge"
+    run = svc.start_run(base, "maximum", engine="real")
+    _wait(run, timeout=180)
+    assert run.status == "complete"
+    rep = run.report
+
+    # challenge 403s are NOT protected endpoints / hidden routes
+    assert rep["recon_results"]["endpoints_discovered"] == 0, \
+        f"challenge 403s produced fake endpoints: {rep['recon_results']['endpoints']}"
+    assert rep["recon_results"]["hidden_routes"] == [], \
+        f"challenge 403s produced fake hidden routes: {rep['recon_results']['hidden_routes']}"
+
+    # nothing was exploited / installed / stolen / deleted
+    assert rep["attack_chain"]["phase_2_exploit"] is False
+    assert rep["persistence_results"]["backdoors_installed"] == 0
+    assert rep["exfiltration_results"]["records_stolen"] == 0
+    assert rep["exfiltration_results"]["data_exfiltrated_mb"] == 0.0
+    assert rep["cover_tracks_results"]["logs_deleted"] == 0
+
+    # distinct labeling — a challenge is NOT a soft-404 catch-all
+    logs = " ".join(e["msg"] for e in run.logs)
+    assert "Cloudflare" in logs and "challenge" in logs.lower(), \
+        "the WAF interception must be labeled in the log stream"
+    assert "Soft-404 catch-all detected" not in logs, \
+        "challenge pages must not be mislabeled as a catch-all"
+
+    # the report carries a waf section and defense credit
+    assert rep["waf"], "report must include a waf section"
+    assert rep["waf"]["provider"] == "cloudflare"
+    assert rep["waf"]["kind"] == "managed_challenge"
+    assert rep["waf"]["requests_intercepted"] > 0
+    assert rep["defense"]["total_blocks"] > 0
+    assert "cloudflare_waf" in rep["defense"]["by_type"]
+
+    # the verdict credits the defenses that repelled the run
+    assert rep["verdict"] == "ACCESS DENIED — target defenses repelled every attack"
+
+    # request events carry WAF defense telemetry (cf-mitigated header)
+    waf_events = [e for e in run.events if e.get("defense") == "cloudflare_waf"]
+    assert waf_events, "tracer should mark cf-mitigated responses as WAF blocks"
+
+    # summary surfaces the interception as a key finding
+    assert any("WAF" in f for f in rep["summary"]["key_findings"])
 
 
 def test_rate_limited_export_finishes_quickly(svc, fake_site):

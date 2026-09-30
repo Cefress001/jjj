@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from .base import CoverTracksModule
 from .soft404 import is_soft404
+from .challenge import detect_challenge, note_challenge
 import time
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,13 @@ class CoverTracksEngine(CoverTracksModule):
         self.artifacts_removed: int = 0
         self.traces_visible: bool = False
         self._sig = None   # soft-404 baseline signature from recon
+        self._ctx = None   # AttackContext — set in execute(), used for WAF counters
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute cover tracks operations using knowledge from all phases"""
         logger.info(f"[Cover] Starting cover tracks on {context.target_url}")
         self._sig = getattr(context, "soft404_signature", None)
+        self._ctx = context
 
         results = await asyncio.gather(
             self._delete_logs(context.target_url),
@@ -91,6 +94,10 @@ class CoverTracksEngine(CoverTracksModule):
                             ) as resp:
                                 if resp.status in [200, 204]:
                                     body = await resp.text(errors="replace")
+                                    if detect_challenge(resp.status, resp.headers, body):
+                                        logger.info("  ✗ Cloudflare challenge page — the WAF blocked the request")
+                                        note_challenge(self)
+                                        continue
                                     if is_soft404(resp.status, body,
                                                   resp.headers.get("Content-Type", ""), self._sig):
                                         continue   # catch-all page, nothing was deleted
@@ -129,6 +136,10 @@ class CoverTracksEngine(CoverTracksModule):
                     ) as resp:
                         if resp.status in [200, 204]:
                             body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                logger.info("  ✗ Cloudflare challenge page — the WAF blocked the request")
+                                note_challenge(self)
+                                continue
                             if is_soft404(resp.status, body,
                                           resp.headers.get("Content-Type", ""), self._sig):
                                 continue   # catch-all page
@@ -185,6 +196,10 @@ class CoverTracksEngine(CoverTracksModule):
                     ) as resp:
                         if resp.status in [200, 201]:
                             body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                logger.info("  ✗ Cloudflare challenge page — the WAF blocked the request")
+                                note_challenge(self)
+                                continue
                             if is_soft404(resp.status, body,
                                           resp.headers.get("Content-Type", ""), self._sig):
                                 continue   # catch-all page, nothing was written
@@ -221,6 +236,10 @@ class CoverTracksEngine(CoverTracksModule):
                     ) as resp:
                         if resp.status in [200, 204]:
                             body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                logger.info("  ✗ Cloudflare challenge page — the WAF blocked the request")
+                                note_challenge(self)
+                                continue
                             if is_soft404(resp.status, body,
                                           resp.headers.get("Content-Type", ""), self._sig):
                                 continue   # catch-all page

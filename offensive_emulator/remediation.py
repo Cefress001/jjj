@@ -264,6 +264,20 @@ def build_recommendations(report: Dict[str, Any], events: List[Dict[str, Any]]) 
 
     out = list(seen.values())
     out.sort(key=lambda r: PRIORITY_ORDER.get(r["priority"], 9))
+
+    # WAF challenge interception (real-engine runs): a positive finding —
+    # the WAF blocked the scan, so the origin was never assessed.
+    if report.get("waf"):
+        out.append({
+            "area": "WAF", "priority": "low",
+            "title": "WAF challenge pages shielded the application from this scan",
+            "fix": "Cloudflare served challenge/interstitial pages instead of the "
+                   "application, so the origin could not be assessed from this "
+                   "client — the WAF did its job. To assess the application behind "
+                   "the WAF, run the scan from an allowlisted IP or temporarily "
+                   "narrow the challenge rule, then re-test.",
+        })
+
     if not out:
         # nothing succeeded — the defenses held
         out.append({
@@ -292,6 +306,17 @@ def enrich(report: Dict[str, Any], events: List[Dict[str, Any]]) -> Dict[str, An
     report["mitre"] = MITRE
     report["recommendations"] = build_recommendations(report, events)
     report["defense"] = build_defense_posture(events)
+    # WAF challenge interceptions deserve defense credit too. The engines
+    # count them (report["waf"]) and the request tracer counts
+    # cf-mitigated responses as events — take the max of the two so shared
+    # sightings are not double-counted.
+    waf = report.get("waf") or {}
+    waf_blocks = int(waf.get("requests_intercepted") or 0)
+    if waf_blocks:
+        posture = report["defense"]
+        by_type = dict(posture.get("by_type") or {})
+        by_type["cloudflare_waf"] = max(int(by_type.get("cloudflare_waf", 0)), waf_blocks)
+        report["defense"] = {"total_blocks": sum(by_type.values()), "by_type": by_type}
     # verdict line for quick scanning
     chain = report.get("attack_chain", {}) or {}
     exploited = bool(chain.get("phase_2_exploit"))
