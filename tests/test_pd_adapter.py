@@ -127,6 +127,7 @@ def test_connected_pipeline_feeds_discovery_to_nuclei(monkeypatch):
 
     available = {
         "httpx": {"available": True}, "katana": {"available": True},
+        "browser": {"available": False, "reason": "fixture"},
         "zap": {"available": False, "reason": "fixture"},
         "nuclei": {"available": True},
     }
@@ -174,6 +175,7 @@ def test_pipeline_continues_when_upstream_tool_fails(monkeypatch):
 
     monkeypatch.setattr(scanner_pipeline, "availability", lambda: {
         "httpx": {"available": True}, "katana": {"available": True},
+        "browser": {"available": False, "reason": "fixture"},
         "zap": {"available": False, "reason": "fixture"},
         "nuclei": {"available": True},
     })

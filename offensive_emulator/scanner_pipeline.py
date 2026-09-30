@@ -8,8 +8,10 @@ isolated, and all findings are normalized into the existing report.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict
 
+import browser_adapter
 import pd_adapter
 import zap_adapter
 from endpoint_corpus import EndpointCorpus
@@ -27,6 +29,7 @@ def availability() -> Dict[str, Dict[str, Any]]:
     return {
         "httpx": pd_adapter.availability()["httpx"],
         "katana": pd_adapter.availability()["katana"],
+        "browser": browser_adapter.availability(),
         "zap": {
             "available": zap["available"], "command": zap.get("command"),
             "description": "Web crawling and passive security analysis",
@@ -34,6 +37,15 @@ def availability() -> Dict[str, Dict[str, Any]]:
         },
         "nuclei": pd_adapter.availability()["nuclei"],
     }
+
+
+def _remove_private_artifact(path: Any) -> None:
+    if not path:
+        return
+    try:
+        Path(str(path)).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _run_tool(name: str, function: Callable[[], Dict[str, Any]],
@@ -65,7 +77,7 @@ def run_installed(target: str, preset: str, run_id: str,
 
     if not any(v["available"] for v in installed.values()):
         log("Supplemental scanners are not installed; continuing with the built-in engine.", "INFO")
-        progress(4, 4)
+        progress(5, 5)
         results.update({name: {"status": "unavailable", "reason": info.get("reason")}
                         for name, info in installed.items()})
         results["endpoint_corpus"] = corpus.summary()
@@ -90,7 +102,7 @@ def run_installed(target: str, preset: str, run_id: str,
                                content_type=record.get("content_type"))
     else:
         results["httpx"] = {"status": "unavailable", "reason": installed["httpx"].get("reason")}
-    progress(1, 4)
+    progress(1, 5)
     if cancelled():
         raise InterruptedError("scan cancelled")
 
@@ -108,23 +120,45 @@ def run_installed(target: str, preset: str, run_id: str,
             corpus.add_many(results["katana"].get("endpoints", []) or [], "katana")
     else:
         results["katana"] = {"status": "unavailable", "reason": installed["katana"].get("reason")}
-    progress(2, 4)
+    progress(2, 5)
     if cancelled():
         raise InterruptedError("scan cancelled")
 
-    if installed["zap"]["available"]:
-        def zap_run() -> Dict[str, Any]:
-            report = zap_adapter.run_baseline(corpus.primary_url, run_id, log, cancelled)
-            return {
-                "alerts_total": report.get("summary", {}).get("alerts_total", 0),
-                "findings": report.get("findings", []),
-                "endpoints": report.get("recon_results", {}).get("endpoints", []),
-            }
-        results["zap"] = _run_tool("OWASP ZAP", zap_run, log)
-        corpus.add_many(results["zap"].get("endpoints", []) or [], "zap")
+    browser_har = None
+    if installed["browser"]["available"]:
+        results["browser"] = _run_tool(
+            "Playwright", lambda: browser_adapter.run_browser(
+                corpus.primary_url, preset, run_id, log, cancelled), log)
+        browser_har = results["browser"].pop("_har_path", None)
     else:
-        results["zap"] = {"status": "unavailable", "reason": installed["zap"].get("reason")}
-    progress(3, 4)
+        results["browser"] = {
+            "status": "unavailable", "reason": installed["browser"].get("reason")}
+    try:
+        for record in results["browser"].get("endpoint_records", []) or []:
+            corpus.add(record.get("url", ""), "browser",
+                       method=record.get("method") or "GET",
+                       status=record.get("status"),
+                       content_type=record.get("content_type"))
+        progress(3, 5)
+        if cancelled():
+            raise InterruptedError("scan cancelled")
+        if installed["zap"]["available"]:
+            def zap_run() -> Dict[str, Any]:
+                report = zap_adapter.run_baseline(
+                    corpus.primary_url, run_id, log, cancelled, har_path=browser_har)
+                return {
+                    "alerts_total": report.get("summary", {}).get("alerts_total", 0),
+                    "findings": report.get("findings", []),
+                    "endpoints": report.get("recon_results", {}).get("endpoints", []),
+                }
+            results["zap"] = _run_tool("OWASP ZAP", zap_run, log)
+            corpus.add_many(results["zap"].get("endpoints", []) or [], "zap")
+        else:
+            results["zap"] = {
+                "status": "unavailable", "reason": installed["zap"].get("reason")}
+    finally:
+        _remove_private_artifact(browser_har)
+    progress(4, 5)
     if cancelled():
         raise InterruptedError("scan cancelled")
 
@@ -138,7 +172,7 @@ def run_installed(target: str, preset: str, run_id: str,
         results["nuclei"]["endpoint_budget"] = nuclei_budget
     else:
         results["nuclei"] = {"status": "unavailable", "reason": installed["nuclei"].get("reason")}
-    progress(4, 4)
+    progress(5, 5)
 
     corpus_summary = corpus.summary()
     corpus_summary["selected_for_nuclei"] = len(nuclei_targets)

@@ -2,3 +2,7 @@
 #
 # Optional — enables the real HTTP attack engines:
 aiohttp>=3.8.0
+
+# Optional for direct/source installs — enables Phase 2 browser discovery.
+# After installation run: python -m playwright install chromium
+playwright==1.63.0

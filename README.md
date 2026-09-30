@@ -54,11 +54,14 @@ connected discovery, browser crawling, authentication, schema-driven API tests,
 evidence and verification, policy enforcement, vulnerability intelligence,
 regression scanning, and operator-defined business workflows.
 
-Phase 1 is implemented: httpx establishes the canonical target, Katana and ZAP
-feed a shared in-scope endpoint corpus, and Nuclei consumes a profile-bounded
-list of discovered dynamic endpoints instead of scanning only the root URL.
-See [`PHASE1_AUDIT.md`](PHASE1_AUDIT.md) for the hardening results, test matrix,
-and the remaining full-container smoke-test gate.
+Phases 1 and 2 are implemented: httpx establishes the canonical target; Katana,
+Playwright, and ZAP feed a shared in-scope endpoint corpus; browser traffic is
+imported into ZAP passive analysis; and Nuclei consumes a profile-bounded list
+of discovered dynamic endpoints instead of scanning only the root URL. See
+[`PHASE1_AUDIT.md`](PHASE1_AUDIT.md) for the Phase 1 hardening record and
+[`PHASE2_AUDIT.md`](PHASE2_AUDIT.md) for browser safety, coverage, and validation
+boundaries. The full container and real-Chromium acceptance smoke remain
+release-runner gates.
 
 ## Quick start
 
@@ -73,13 +76,16 @@ python run.py
 
 ### Automatic multi-tool assessment
 
-The standard Docker image includes four established scanners. They are internal
-pipeline stages—not separate modes—so the interface remains one target, one
-profile, one launch button, and one combined report:
+The standard Docker image includes five automatic assessment stages. They are
+internal pipeline stages—not separate modes—so the interface remains one
+target, one profile, one launch button, and one combined report:
 
 - **httpx** — reachability, redirects, metadata, and technology profiling
 - **Katana** — bounded same-domain crawling and endpoint discovery
-- **OWASP ZAP baseline** — crawling plus passive web-security analysis
+- **Playwright + Chromium** — bounded rendered-DOM, fetch/XHR, form, resource,
+  and WebSocket discovery for JavaScript applications
+- **OWASP ZAP baseline** — crawling plus passive web-security analysis,
+  including bounded browser HAR import
 - **Nuclei** — signed/community template checks with DoS, fuzz, and intrusive
   tags excluded by policy
 
@@ -95,9 +101,11 @@ deduplicated into the existing report/archive. A failure in one add-on is shown
 in `scanner_results` but does not discard results from the other tools.
 
 The app uses conservative per-profile rate limits and excludes explicitly
-intrusive Nuclei tags. These tools still make real requests, and ZAP's crawler
-can follow application links. Scan only systems you own or have explicit
-permission to assess.
+intrusive Nuclei tags. Browser discovery never submits forms, blocks non-read
+HTTP methods, rejects destructive navigation terms, does not follow
+cross-origin navigation, and applies page/depth/request/runtime/artifact caps.
+These tools still make real requests, and ZAP's crawler can follow application
+links. Scan only systems you own or have explicit permission to assess.
 
 For a small simulation-only image:
 
@@ -106,8 +114,9 @@ docker build -f Dockerfile.lite -t offensive-emulator-lite .
 ```
 
 When running directly instead of Docker, installed tools are auto-detected on
-`PATH`. Custom locations can be supplied through `HTTPX_COMMAND`,
-`KATANA_COMMAND`, `NUCLEI_COMMAND`, and `ZAP_BASELINE_COMMAND`.
+`PATH`; Playwright is enabled only when its Chromium executable is present.
+Custom locations can be supplied through `HTTPX_COMMAND`, `KATANA_COMMAND`,
+`BROWSER_COMMAND`, `NUCLEI_COMMAND`, and `ZAP_BASELINE_COMMAND`.
 
 In the console:
 
@@ -144,7 +153,9 @@ run.py                          ← THE entry point (server or headless CLI)
 offensive_emulator/
 ├── app_server.py               ← unified server: UI + API + demo target (stdlib only)
 ├── attack_service.py               ← run manager: threads, event stream, tracing, persistence
-├── scanner_pipeline.py             ← automatic httpx/Katana/ZAP/Nuclei orchestration + merge
+├── scanner_pipeline.py             ← automatic five-stage scanner orchestration + merge
+├── browser_adapter.py              ← isolated Playwright runner, cancellation, artifact bounds
+├── browser_worker.py               ← safe same-host rendered/network discovery
 ├── pd_adapter.py · zap_adapter.py  ← safe subprocess runners + JSON/JSONL normalization
 ├── simulator.py                    ← zero-dependency simulation engine (fallback)
 ├── demo_target.py                  ← built-in vulnerable "VulnPay" app · 3 difficulty modes

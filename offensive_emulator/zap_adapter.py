@@ -221,7 +221,8 @@ def build_report(target: str, run_id: str, payload: Dict[str, Any],
 def run_baseline(target: str, run_id: str,
                  log: Callable[[str, str], None],
                  cancelled: Callable[[], bool],
-                 timeout: int = 900) -> Dict[str, Any]:
+                 timeout: int = 900,
+                 har_path: Optional[str] = None) -> Dict[str, Any]:
     cmd = command()
     if not cmd:
         raise ZapUnavailable(availability()["reason"])
@@ -230,6 +231,9 @@ def run_baseline(target: str, run_id: str,
     with tempfile.TemporaryDirectory(prefix="offensive-emulator-zap-") as tmp:
         report_path = Path(tmp) / "zap-report.json"
         full_cmd = cmd + ["-t", target, "-J", str(report_path), "-I"]
+        if har_path and Path(har_path).is_file() and Path(har_path).stat().st_size <= 32 * 1024 * 1024:
+            full_cmd += ["-z", f"-importHar {har_path}"]
+            log("ZAP will import the browser HAR before passive analysis", "INFO")
         log("Starting OWASP ZAP baseline scan (crawl + passive analysis)", "PHASE")
         log("ZAP baseline does not run the active scanner, but its crawler sends requests.", "WARN")
         try:

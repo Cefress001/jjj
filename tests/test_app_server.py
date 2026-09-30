@@ -42,7 +42,7 @@ def test_health(server):
 def test_configs_payload(server):
     d = get(server, "/api/configs")
     assert {"phases", "presets", "mitre", "demo_targets", "scanners"} <= set(d)
-    assert set(d["scanners"]) == {"httpx", "katana", "zap", "nuclei"}
+    assert set(d["scanners"]) == {"httpx", "katana", "browser", "zap", "nuclei"}
     assert set(d["demo_targets"]) == {"easy", "hardened", "fortified"}
     assert len(d["phases"]) == 6
     assert set(d["presets"]) == {"stealth", "balanced", "aggressive", "maximum"}

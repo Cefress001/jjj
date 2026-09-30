@@ -76,6 +76,33 @@ def test_zap_cancellation_is_prompt(tmp_path, monkeypatch):
     assert time.time() - started < 3
 
 
+def test_zap_receives_browser_har_for_passive_analysis(tmp_path, monkeypatch):
+    import zap_adapter
+
+    report_file = tmp_path / "fixture.json"
+    report_file.write_text(json.dumps(SAMPLE), encoding="utf-8")
+    args_file = tmp_path / "args.json"
+    har = tmp_path / "browser.har"
+    har.write_text('{"log":{"entries":[]}}', encoding="utf-8")
+    fake = tmp_path / "zap-baseline.py"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json,pathlib,sys\n"
+        "a=sys.argv\n"
+        f"pathlib.Path({str(args_file)!r}).write_text(json.dumps(a[1:]))\n"
+        f"pathlib.Path(a[a.index('-J')+1]).write_text(pathlib.Path({str(report_file)!r}).read_text())\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("ZAP_BASELINE_COMMAND", str(fake))
+    zap_adapter.run_baseline(
+        "https://example.test", "run", lambda *args: None, lambda: False,
+        timeout=5, har_path=str(har))
+    args = json.loads(args_file.read_text())
+    assert "-z" in args
+    assert any("-importHar" in value and str(har) in value for value in args)
+
+
 def test_zap_run_through_service(svc, tmp_path, monkeypatch):
     report_file = tmp_path / "fixture.json"
     report_file.write_text(json.dumps(SAMPLE), encoding="utf-8")

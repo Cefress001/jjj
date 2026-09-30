@@ -1,9 +1,10 @@
 # Offensive Emulator — Real-World Assessment Master Build Plan
 
 **Status:** Active  
-**Current milestone:** Phase 1 — Shared endpoint corpus and connected scanner pipeline (implemented and audited; awaiting full-container smoke test)
+**Current milestone:** Phase 2 — Browser-native discovery (implemented; real-Chromium/full-container release smoke pending)
 
-Detailed quality record: [`PHASE1_AUDIT.md`](PHASE1_AUDIT.md).  
+Detailed Phase 1 quality record: [`PHASE1_AUDIT.md`](PHASE1_AUDIT.md).
+
 **Product constraint:** Preserve the existing one-target, one-profile, one-launch, one-report experience. New capabilities are internal pipeline stages, not competing user-facing modes.
 
 ## Product objective
@@ -150,6 +151,28 @@ A deterministic endpoint corpus that all later phases—browser, authentication,
 - Cross-origin browser requests are recorded but not followed unless explicitly in scope.
 - Browser crashes and timeouts do not fail the overall run.
 - Screenshots and artifacts obey size and redaction limits.
+
+### Implementation status (2026-09-30)
+
+- [x] Added a process-isolated Playwright worker with profile-specific page,
+  depth, request, settle-time, and runtime budgets.
+- [x] Added same-host navigation enforcement, mutation blocking, destructive URL
+  filtering, dialog dismissal, and form discovery without submission.
+- [x] Capture rendered links/resources/forms plus request/response, fetch/XHR,
+  field names, content types, status, WebSocket, and cross-origin observations.
+- [x] Added bounded screenshots, private bounded HAR retention, sanitized report
+  paths, output limits, cancellation, and process-tree cleanup.
+- [x] Feed browser records into the shared corpus and Nuclei; import browser HAR
+  into ZAP and delete it in cancellation/error-safe cleanup.
+- [x] Bundle pinned `playwright==1.63.0` and its matching Chromium in the full
+  image; direct installs verify that both package and browser executable exist.
+- [x] Added unit/fixture coverage for scope and safety helpers, worker isolation,
+  cancellation, artifact sanitization, browser-to-ZAP/Nuclei propagation, HAR
+  cleanup/import, and graceful unavailability.
+- [ ] Execute the real-browser SPA acceptance test and full-image smoke on a
+  Docker-capable runner. The test fixture is included and auto-runs when
+  Chromium is available; this workspace could install the Python package but
+  outbound policy blocked Chromium CDN access.
 
 ---
 

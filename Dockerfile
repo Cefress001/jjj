@@ -28,9 +28,13 @@ COPY --from=nuclei --chown=zap:zap /opt/nuclei-templates /home/zap/nuclei-templa
 COPY --chown=zap:zap run.py requirements.txt ./
 COPY --chown=zap:zap offensive_emulator ./offensive_emulator
 
-# The core HTTP workflow uses aiohttp. ZAP's image includes Python because its
-# packaged scans are Python programs; install aiohttp into that interpreter.
-RUN python3 -m pip install --break-system-packages --no-cache-dir aiohttp
+# Install the core HTTP dependency and a pinned Playwright/Chromium pair.
+# A shared browser path keeps Chromium readable after dropping to user `zap`.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+      aiohttp playwright==1.63.0 && \
+    python3 -m playwright install --with-deps chromium && \
+    chmod -R a+rX /ms-playwright
 
 ENV PYTHONUNBUFFERED=1 \
     ZAP_BASELINE_COMMAND="/zap/zap-baseline.py -m 2" \
