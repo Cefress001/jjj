@@ -8,6 +8,8 @@ import aiohttp
 from typing import Dict, List, Any, Optional, Set
 import logging
 from .base import ReconModule
+from .soft404 import probe_baseline, is_soft404
+from .challenge import detect_challenge, challenge_label, note_challenge
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +31,37 @@ class ReconEngine(ReconModule):
         self.discovered_endpoints: Set[str] = set()
         self.tech_stack: Dict[str, str] = {}
         self.response_patterns: Dict[str, Any] = {}
+        self._sig = None   # soft-404 baseline signature
+        self._ctx = None   # AttackContext — set in execute(), used for WAF counters
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute full reconnaissance phase and update context"""
         logger.info(f"[Recon] Starting reconnaissance on {context.target_url}")
+        self._ctx = context
+
+        # Real-world sites often soft-404 every unknown path to the homepage.
+        # Probe once; the signature filters false discoveries in every phase.
+        # A WAF challenge page on the probe is a different finding and is
+        # labeled as such — see challenge.py.
+        probe = await probe_baseline(context.target_url)
+        context.soft404_signature = probe.get("soft404")
+        self._sig = context.soft404_signature
+        if probe.get("challenge"):
+            context.waf_challenge = probe["challenge"]
+            logger.warning(
+                f"[Recon] Cloudflare {challenge_label(probe['challenge'])} detected — "
+                f"the WAF is intercepting requests and serving challenge pages; "
+                f"the application itself is NOT reachable from this client. "
+                f"Findings below reflect the WAF, not the app.")
+        elif context.soft404_signature:
+            logger.info("[Recon] Soft-404 catch-all detected — homepage mirror "
+                        "responses will be filtered from discovery")
 
         results = await asyncio.gather(
-            self._enumerate_endpoints(context.target_url),
-            self._fingerprint_tech_stack(context.target_url),
-            self._detect_hidden_routes(context.target_url),
-            self._establish_baselines(context.target_url)
+            self._enumerate_endpoints(context),
+            self._fingerprint_tech_stack(context),
+            self._detect_hidden_routes(context),
+            self._establish_baselines(context)
         )
 
         # Update context with discovered information
@@ -55,9 +78,10 @@ class ReconEngine(ReconModule):
             "total_endpoints": len(self.discovered_endpoints)
         }
 
-    async def _enumerate_endpoints(self, target: str) -> List[str]:
+    async def _enumerate_endpoints(self, context) -> List[str]:
         """Brute-force common API paths"""
         logger.info(f"[Recon] Enumerating endpoints...")
+        target = context.target_url
 
         common_paths = [
             "/api/users", "/api/admin", "/api/config", "/api/debug",
@@ -74,12 +98,27 @@ class ReconEngine(ReconModule):
             for path in common_paths:
                 try:
                     url = f"{target}{path}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as resp:
                         if resp.status == 200:
+                            body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                logger.info(f"  ✗ {path} — Cloudflare challenge page, not a real endpoint")
+                                note_challenge(self)
+                                continue
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""),
+                                          self._sig):
+                                continue   # homepage mirror, not a real endpoint
                             found.append(path)
                             self.discovered_endpoints.add(path)
                             logger.info(f"  ✓ Found: {path} (200)")
                         elif resp.status == 403:
+                            body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                # a WAF challenge 403 is NOT a protected endpoint
+                                logger.info(f"  ✗ {path} — 403 is a Cloudflare challenge page, not a protected endpoint")
+                                note_challenge(self)
+                                continue
                             found.append(path)
                             self.discovered_endpoints.add(path)
                             logger.info(f"  ✓ Found: {path} (403 - Protected)")
@@ -89,9 +128,10 @@ class ReconEngine(ReconModule):
         logger.info(f"[Recon] Discovered {len(found)} endpoints")
         return found
 
-    async def _fingerprint_tech_stack(self, target: str) -> Dict[str, str]:
+    async def _fingerprint_tech_stack(self, context) -> Dict[str, str]:
         """Identify framework, database, CDN, versions"""
         logger.info(f"[Recon] Fingerprinting tech stack...")
+        target = context.target_url
 
         self.tech_stack = {
             "framework": "Unknown",
@@ -103,7 +143,7 @@ class ReconEngine(ReconModule):
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(target, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(target, timeout=aiohttp.ClientTimeout(total=12)) as resp:
                     headers = resp.headers
 
                     # Detect server
@@ -142,9 +182,10 @@ class ReconEngine(ReconModule):
 
         return self.tech_stack
 
-    async def _detect_hidden_routes(self, target: str) -> List[str]:
+    async def _detect_hidden_routes(self, context) -> List[str]:
         """Find hidden admin endpoints"""
         logger.info(f"[Recon] Detecting hidden admin routes...")
+        target = context.target_url
 
         admin_patterns = [
             "/admin", "/admin/users", "/admin/dashboard", "/admin/config",
@@ -159,8 +200,17 @@ class ReconEngine(ReconModule):
             for pattern in admin_patterns:
                 try:
                     url = f"{target}{pattern}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                         if resp.status in [200, 403]:
+                            body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                logger.info(f"  ✗ {pattern} — Cloudflare challenge page, not a hidden route")
+                                note_challenge(self)
+                                continue
+                            if resp.status == 200 and is_soft404(resp.status, body,
+                                                              resp.headers.get("Content-Type", ""),
+                                                              self._sig):
+                                continue   # homepage mirror
                             hidden.append(pattern)
                             logger.info(f"  ✓ Hidden route: {pattern} ({resp.status})")
                 except:
@@ -169,9 +219,10 @@ class ReconEngine(ReconModule):
         logger.info(f"[Recon] Found {len(hidden)} hidden routes")
         return hidden
 
-    async def _establish_baselines(self, target: str) -> Dict[str, Any]:
+    async def _establish_baselines(self, context) -> Dict[str, Any]:
         """Establish normal response patterns for later comparison"""
         logger.info(f"[Recon] Establishing response baselines...")
+        target = context.target_url
 
         baselines = {
             "valid_user_latency_ms": 0,
@@ -185,7 +236,7 @@ class ReconEngine(ReconModule):
                 # Measure valid endpoint latency
                 import time
                 start = time.time()
-                async with session.get(f"{target}/api/users", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(f"{target}/api/users", timeout=aiohttp.ClientTimeout(total=12)) as resp:
                     baselines["valid_user_latency_ms"] = (time.time() - start) * 1000
                     baselines["response_size_bytes"] = len(await resp.text())
                     if "X-Cache" in resp.headers:

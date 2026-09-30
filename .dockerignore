@@ -1,0 +1,8 @@
+.git
+.venv
+node_modules
+__pycache__
+offensive_emulator/data
+*.pyc
+threat_report_*.json
+tests

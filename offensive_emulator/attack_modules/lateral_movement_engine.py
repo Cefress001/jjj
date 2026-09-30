@@ -83,7 +83,7 @@ class LateralMovementEngine(LateralMovementModule):
             for endpoint in credential_endpoints:
                 try:
                     url = f"{target}{endpoint}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                         if resp.status == 200:
                             content = await resp.text()
 
@@ -127,7 +127,7 @@ class LateralMovementEngine(LateralMovementModule):
             for endpoint in internal_endpoints:
                 try:
                     url = f"{target}{endpoint}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
 
@@ -174,7 +174,7 @@ class LateralMovementEngine(LateralMovementModule):
             for path in all_paths:
                 try:
                     url = f"{target}{path}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                         if resp.status == 200:
                             content = await resp.text()
                             if "BEGIN" in content and ("RSA" in content or "PRIVATE" in content):
@@ -216,7 +216,7 @@ class LateralMovementEngine(LateralMovementModule):
             for endpoint in cloud_endpoints:
                 try:
                     url = f"{target}{endpoint}"
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                         if resp.status == 200:
                             content = await resp.text()
 

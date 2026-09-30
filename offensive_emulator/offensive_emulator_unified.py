@@ -254,48 +254,66 @@ class UnifiedOffensiveEmulator:
             phase_time = time.time() - phase_start
             self.context.phase_timings["cover_tracks"] = phase_time
 
-            logger.info(f"\n✓ COVER TRACKS COMPLETE ({phase_time:.2f}s)")
-            logger.info(f"  Logs deleted: {self.context.logs_deleted}")
-            logger.info(f"  Artifacts removed: {self.context.artifacts_removed}")
-            logger.info(f"  Traces visible: {self.context.traces_visible}")
-            return True
+            covered = (self.context.logs_deleted > 0 or self.context.artifacts_removed > 0)
+
+            if covered:
+                logger.info(f"\n✓ COVER TRACKS COMPLETE ({phase_time:.2f}s)")
+                logger.info(f"  Logs deleted: {self.context.logs_deleted}")
+                logger.info(f"  Artifacts removed: {self.context.artifacts_removed}")
+                logger.info(f"  Traces visible: {self.context.traces_visible}")
+            else:
+                logger.info(f"\n✗ COVER TRACKS FAILED ({phase_time:.2f}s) — defenses held the audit trail")
+            return covered
 
         except Exception as e:
             logger.error(f"✗ COVER TRACKS ERROR: {e}")
             return False
 
-    async def run_full_attack(self) -> Dict[str, Any]:
+    async def run_full_attack(self, on_phase=None) -> Dict[str, Any]:
         """
         Execute complete attack lifecycle with state threading
         Returns unified threat report
+
+        on_phase(phase_key, status) is an optional callback invoked as each
+        phase transitions: "running" → "complete" | "failed" | "skipped".
+        Raising an exception inside on_phase aborts the attack.
         """
         attack_start = time.time()
 
-        # Execute all phases in sequence with state dependency
-        phase1_success = await self.phase_1_reconnaissance()
+        # Phase pipeline: (key, display label, coroutine, required phase)
+        pipeline = [
+            ("recon",            "RECONNAISSANCE",   self.phase_1_reconnaissance,     None),
+            ("exploit",          "EXPLOITATION",     self.phase_2_exploitation,       "recon"),
+            ("persistence",      "PERSISTENCE",      self.phase_3_persistence,        "exploit"),
+            ("lateral_movement", "LATERAL MOVEMENT", self.phase_4_lateral_movement,   "persistence"),
+            ("exfiltration",     "EXFILTRATION",     self.phase_5_exfiltration,       "lateral_movement"),
+            ("cover_tracks",     "COVER TRACKS",     self.phase_6_cover_tracks,       None),
+        ]
 
-        if phase1_success:
-            phase2_success = await self.phase_2_exploitation()
+        outcome: Dict[str, bool] = {}
 
-            if phase2_success:
-                phase3_success = await self.phase_3_persistence()
+        for key, label, phase_fn, requires in pipeline:
+            # State-dependent gating: a phase only runs if its prerequisite succeeded
+            if requires is not None and not outcome.get(requires):
+                outcome[key] = False
+                if on_phase:
+                    on_phase(key, "skipped")
+                continue
 
-                if phase3_success:
-                    phase4_success = await self.phase_4_lateral_movement()
+            if on_phase:
+                on_phase(key, "running")
 
-                    if phase4_success:
-                        phase5_success = await self.phase_5_exfiltration()
-                    else:
-                        phase5_success = False
-                else:
-                    phase4_success = phase5_success = False
-            else:
-                phase3_success = phase4_success = phase5_success = False
-        else:
-            phase2_success = phase3_success = phase4_success = phase5_success = False
+            outcome[key] = await phase_fn()
 
-        # Final cleanup
-        phase6_success = await self.phase_6_cover_tracks()
+            if on_phase:
+                on_phase(key, "complete" if outcome[key] else "failed")
+
+        phase1_success = outcome["recon"]
+        phase2_success = outcome["exploit"]
+        phase3_success = outcome["persistence"]
+        phase4_success = outcome["lateral_movement"]
+        phase5_success = outcome["exfiltration"]
+        phase6_success = outcome["cover_tracks"]
 
         # Generate comprehensive threat report
         total_time = time.time() - attack_start
@@ -303,6 +321,7 @@ class UnifiedOffensiveEmulator:
         report = {
             "run_id": self.run_id,
             "target": self.target_url,
+            "engine": "real",
             "timestamp": datetime.now().isoformat(),
             "total_time_seconds": total_time,
 
@@ -354,10 +373,27 @@ class UnifiedOffensiveEmulator:
                 "traces_visible": self.context.traces_visible,
             },
 
+            "waf": self._waf_summary(),
+
             "summary": self._generate_summary(phase2_success, phase3_success, phase4_success, phase5_success),
         }
 
         return report
+
+    def _waf_summary(self) -> Optional[Dict[str, Any]]:
+        """WAF challenge interception summary (None when no WAF interfered)."""
+        ch = getattr(self.context, "waf_challenge", None)
+        if not ch:
+            return None
+        return {
+            "provider": ch.get("provider", "unknown"),
+            "kind": ch.get("kind", "challenge"),
+            "requests_intercepted": getattr(self.context, "waf_interceptions", 0),
+            "note": ("WAF challenge pages were served instead of application "
+                     "responses — the application itself was never reached by "
+                     "this run. Endpoints/exploits below were not fabricated "
+                     "from challenge pages."),
+        }
 
     def _generate_summary(self, phase2, phase3, phase4, phase5) -> Dict[str, Any]:
         """Generate attack summary and risk assessment"""
@@ -372,18 +408,25 @@ class UnifiedOffensiveEmulator:
 
         severity = next((level for level, triggered in impact_levels.items() if triggered), "Low")
 
+        findings = [
+            f"Discovered {len(self.context.discovered_endpoints)} endpoints",
+            f"Exploited {len(self.context.exploited_methods)} methods" if self.context.exploited_methods else "No successful exploits",
+            f"Established {len(self.context.backdoors_installed)} backdoors" if self.context.backdoors_installed else "No persistence",
+            f"Extracted {len(self.context.extracted_credentials)} credentials" if self.context.extracted_credentials else "No credential extraction",
+            f"Stole {self.context.records_stolen} records / {self.context.data_exfiltrated_mb:.2f} MB" if self.context.records_stolen > 0 else "No data theft",
+            f"Evaded detection: {not self.context.traces_visible}",
+        ]
+        waf = getattr(self.context, "waf_challenge", None)
+        if waf:
+            findings.insert(0, f"WAF ({waf.get('provider', 'unknown')}) intercepted "
+                               f"{getattr(self.context, 'waf_interceptions', 0)} requests — "
+                               f"challenge pages, not application responses")
+
         return {
             "attack_success_rate": f"{success_rate:.1f}%",
             "severity": severity,
             "phases_completed": sum([phase2, phase3, phase4, phase5]),
-            "key_findings": [
-                f"Discovered {len(self.context.discovered_endpoints)} endpoints",
-                f"Exploited {len(self.context.exploited_methods)} methods" if self.context.exploited_methods else "No successful exploits",
-                f"Established {len(self.context.backdoors_installed)} backdoors" if self.context.backdoors_installed else "No persistence",
-                f"Extracted {len(self.context.extracted_credentials)} credentials" if self.context.extracted_credentials else "No credential extraction",
-                f"Stole {self.context.records_stolen} records / {self.context.data_exfiltrated_mb:.2f} MB" if self.context.records_stolen > 0 else "No data theft",
-                f"Evaded detection: {not self.context.traces_visible}",
-            ]
+            "key_findings": findings,
         }
 
     def print_report(self, report: Dict[str, Any]) -> None:

