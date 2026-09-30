@@ -23,7 +23,7 @@
   <div class="corner tr">ENGINE <span id="landing-engine">…</span><br>LINK SECURE</div>
 
   <div class="landing-inner">
-    <div class="badge">⚔ &nbsp;V4.0 &nbsp;·&nbsp; <b>UNIFIED PLATFORM</b>&nbsp; · &nbsp;6-PHASE KILL CHAIN</div>
+    <div class="badge">⚔ &nbsp;V4.1 &nbsp;·&nbsp; <b>UNIFIED PLATFORM</b>&nbsp; · &nbsp;6-PHASE KILL CHAIN</div>
 
     <h1 class="title">
       <span class="t1" data-text="OFFENSIVE">OFFENSIVE</span>
@@ -50,7 +50,7 @@
       <button id="cta-enter">▶&nbsp; LAUNCH CONSOLE</button>
     </div>
     <div class="cta-note">
-      <b>zero dependencies</b> · runs locally · built-in demo target included
+      <b>zero dependencies</b> · runs locally · 3 difficulty modes built in
     </div>
   </div>
 
@@ -68,11 +68,13 @@
       <div>
         <div class="name">OFFENSIVE EMULATOR</div>
       </div>
-      <span class="ver">v4.0</span>
+      <span class="ver">v4.1</span>
     </div>
     <span id="engine-badge" class="engine-badge sim">◈ ENGINE: …</span>
     <div class="spacer"></div>
     <div id="run-pill" class="run-pill"><span class="dot"></span><span id="run-pill-text">IDLE</span></div>
+    <button id="btn-mute" class="btn-ghost" title="Toggle sound (M)">♪ SOUND ON</button>
+    <button id="btn-help" class="btn-ghost" title="Shortcuts (?)">?</button>
     <button id="btn-back" class="btn-ghost">◂ LANDING</button>
   </header>
 
@@ -91,13 +93,20 @@
           <button id="btn-demo" class="btn-mini">⚡ USE BUILT-IN DEMO TARGET</button>
         </div>
 
+        <div class="field-label" style="margin-top:12px"><span>DEMO DIFFICULTY</span><span class="r" id="diff-note"></span></div>
+        <div id="difficulty" class="difficulty">
+          <button class="diff" data-mode="easy"><b>EASY</b><span>full breach</span></button>
+          <button class="diff" data-mode="hardened"><b>HARDENED</b><span>breach contained</span></button>
+          <button class="diff" data-mode="fortified"><b>FORTIFIED</b><span>target holds</span></button>
+        </div>
+
         <div class="divider">ATTACK PROFILE</div>
         <div id="preset-grid" class="preset-grid"></div>
 
         <button id="btn-attack">▶ INITIATE ATTACK</button>
         <button id="btn-abort">■ ABORT RUN</button>
 
-        <div class="divider">RUN HISTORY</div>
+        <div class="divider">RUN HISTORY <a href="#" id="btn-archive" class="h-link">VIEW ARCHIVE ▸</a></div>
         <div id="history" class="history"></div>
       </div>
     </aside>
@@ -105,7 +114,8 @@
     <!-- 3D STAGE -->
     <section id="stage">
       <div class="hud" id="hud-tl"><div class="hud-card">
-        <div class="hud-status"><span class="dot"></span><span class="hud-label" id="hud-status-text">STANDBY</span></div>
+        <div class="hud-status"><span class="dot"></span><span class="hud-label" id="hud-status-text">STANDBY</span>
+          <span class="hud-livechip" id="hud-livechip">LIVE</span></div>
         <div class="hud-phase" id="hud-phase">awaiting orders</div>
         <div class="hud-elapsed" id="hud-elapsed">⏱ 0s</div>
       </div></div>
@@ -121,10 +131,24 @@
       </div></div>
 
       <div class="hud" id="hud-br">
-        <div class="hud-card"><b>drag</b> orbit · <b>scroll</b> zoom · <b>click node</b> focus</div>
+        <div class="hud-card">
+          <button id="btn-director" class="cam-chip" title="Director camera (D)">CAM: AUTO</button>
+          <span class="hud-hintline"><b>drag</b> orbit · <b>scroll</b> zoom · <b>click node</b> focus</span>
+        </div>
       </div>
 
       <div id="stage-tooltip"></div>
+
+      <!-- replay transport -->
+      <div id="replay-bar" class="replay-bar hidden">
+        <button id="replay-play" class="rp-btn" title="Play/Pause (R)">⏵</button>
+        <span class="rp-badge">REPLAY</span>
+        <input id="replay-slider" class="rp-slider" type="range" min="0" max="1000" value="0">
+        <span id="replay-time" class="rp-time">0.0s</span>
+        <button id="replay-speed" class="rp-btn rp-speed" title="Playback speed">1×</button>
+        <button id="replay-exit" class="rp-btn rp-exit" title="Exit replay (Esc)">⏹</button>
+      </div>
+
       <div class="stage-fallback">
         3D VIEW UNAVAILABLE<br>(WebGL disabled) — telemetry continues in the panels →
       </div>
@@ -137,7 +161,12 @@
         <span class="hint">STREAM</span>
       </div>
       <div class="panel-body">
-        <div class="terminal-wrap">
+        <div class="tabs">
+          <button id="tab-terminal" class="tab active">⌁ TERMINAL</button>
+          <button id="tab-network" class="tab">◉ NETWORK <span id="net-count" class="tab-count">0</span></button>
+        </div>
+
+        <div id="terminal-wrap" class="terminal-wrap">
           <div class="terminal-head">
             <span class="tdot" style="background:#f43f5e"></span>
             <span class="tdot" style="background:#fbbf24"></span>
@@ -151,6 +180,25 @@
             </div>
           </div>
         </div>
+
+        <div id="network-wrap" class="network-wrap hidden">
+          <div class="net-stats">
+            <span class="ns"><b id="ns-total">0</b> requests</span>
+            <span class="ns ns-err"><b id="ns-errors">0</b> errors</span>
+            <span class="ns"><b id="ns-avg">0</b> ms avg</span>
+            <span class="ns ns-def"><b id="ns-def">0</b> 🛡 blocked</span>
+          </div>
+          <div class="net-filters">
+            <button class="nf active" data-f="all">ALL</button>
+            <button class="nf" data-f="2xx">2XX</button>
+            <button class="nf" data-f="4xx">4XX</button>
+            <button class="nf" data-f="def">DEFENSE</button>
+          </div>
+          <div class="net-table" id="net-table">
+            <div class="net-empty">no traffic yet — requests stream here during a run</div>
+          </div>
+        </div>
+
         <div id="phase-grid" class="phase-grid"></div>
       </div>
     </aside>
@@ -186,6 +234,7 @@
         </div>
         <div class="report-vitals">
           <span class="sev-chip sev-Low" id="rep-sev">SEVERITY: —</span>
+          <div class="verdict-line" id="rep-verdict"></div>
           <div class="vital-rows">
             <div class="vital-row"><span class="k">Target</span><span class="v" id="rep-v-target">—</span></div>
             <div class="vital-row"><span class="k">Run</span><span class="v" id="rep-v-run">—</span></div>
@@ -195,14 +244,74 @@
         </div>
       </div>
 
-      <div class="m-section"><h3>Attack chain</h3><div class="chain-list" id="rep-chain"></div></div>
+      <div class="m-section"><h3>Attack chain · MITRE ATT&amp;CK</h3><div class="chain-list" id="rep-chain"></div></div>
+
+      <div class="m-section" id="rep-defense-section" style="display:none">
+        <h3>Defense posture</h3>
+        <div class="defense-note" id="rep-defense-note"></div>
+        <div class="dchips" id="rep-defense-chips"></div>
+      </div>
+
       <div class="m-section"><h3>Key findings</h3><ol class="findings" id="rep-findings"></ol></div>
+
+      <div class="m-section"><h3>Remediation priorities</h3><div id="rep-recs"></div></div>
+
       <div class="m-section"><h3>Impact metrics</h3><div class="tiles" id="rep-tiles"></div></div>
     </div>
     <div class="modal-actions">
       <button class="btn primary" id="rep-again">▶ RUN AGAIN</button>
+      <a class="btn" id="rep-replay" href="#">⏱ REPLAY RUN</a>
       <a class="btn" id="rep-dl-html" href="#" download>⤓ HTML REPORT</a>
       <a class="btn" id="rep-dl-json" href="#" download>⤓ JSON REPORT</a>
+      <a class="btn" id="rep-print" href="#" target="_blank">⎙ PRINT / PDF</a>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ ARCHIVE MODAL -->
+<div id="archive-backdrop" class="modal-backdrop">
+  <div class="modal archive-modal">
+    <div class="modal-head">
+      <div>
+        <h2>RUN ARCHIVE</h2>
+        <div class="m-sub">select any two runs to compare · everything persists across restarts</div>
+      </div>
+      <button id="archive-close" class="modal-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="archive-compare" class="compare hidden"></div>
+      <div class="archive-table" id="archive-table"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn primary" id="btn-compare" disabled>⇄ COMPARE SELECTED</button>
+      <button class="btn" id="archive-clear">CLEAR SELECTION</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================== HELP MODAL -->
+<div id="help-backdrop" class="modal-backdrop">
+  <div class="modal help-modal">
+    <div class="modal-head">
+      <div><h2>CONSOLE SHORTCUTS</h2></div>
+      <button id="help-close" class="modal-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <table class="keys">
+        <tr><td><kbd>Enter</kbd></td><td>initiate attack</td></tr>
+        <tr><td><kbd>1</kbd>–<kbd>6</kbd></td><td>focus a phase node</td></tr>
+        <tr><td><kbd>D</kbd></td><td>toggle director camera</td></tr>
+        <tr><td><kbd>R</kbd></td><td>replay last completed run</td></tr>
+        <tr><td><kbd>M</kbd></td><td>mute / unmute</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>close dialogs · exit replay</td></tr>
+        <tr><td><kbd>?</kbd></td><td>this panel</td></tr>
+      </table>
+      <div class="mouse-map">
+        <b>3D stage</b> — drag to orbit · scroll to zoom · click a node to focus · hover for details
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="help-tour">▸ RESTART ONBOARDING TOUR</button>
     </div>
   </div>
 </div>
@@ -211,6 +320,8 @@
 
 <script src="/static/vendor/three.min.js"></script>
 <script src="/static/js/scenes.js"></script>
+<script src="/static/js/sound.js"></script>
+<script src="/static/js/tour.js"></script>
 <script src="/static/js/app.js"></script>
 </body>
 </html>

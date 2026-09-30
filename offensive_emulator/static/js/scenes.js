@@ -396,6 +396,7 @@
     this.orbitGoal = { theta: 0.85, phi: 1.18, radius: 8.8 };
     this.lastInteract = -10;
     this.hovered = null;
+    this.director = false;          // auto-camera follows the live phase
 
     this._applyCamera(1);
   }
@@ -533,6 +534,22 @@
     node.userData.shell.material.color.setHex(col);
     node.userData.glow.material.color.setHex(col);
     if (state === "complete") this.impactT = 0;
+    // director camera: glide to whichever phase just went live
+    if (this.director && state === "running") {
+      this.focusPhase(key);
+    }
+  };
+
+  ConsoleScene.prototype.setDirector = function (on) {
+    this.director = !!on;
+    if (this.director && this.running) {
+      var live = null;
+      for (var key in this.nodes) {
+        if (this.nodes[key].userData.state === "running") live = key;
+      }
+      if (live) this.focusPhase(live);
+    }
+    return this.director;
   };
 
   ConsoleScene.prototype.resetPhases = function () {
@@ -689,6 +706,10 @@
         g.theta -= dx * 0.0055;
         g.phi = clamp(g.phi - dy * 0.0045, 0.3, 2.55);
         self.console.lastInteract = self.console.time;
+        if (moved > 6 && self.console.director) {
+          self.console.setDirector(false);
+          if (self.onDirectorChange) self.onDirectorChange(false);
+        }
       }
       function up() {
         dragging = false;
@@ -714,6 +735,10 @@
         var g = self.console.orbitGoal;
         g.radius = clamp(g.radius * (1 + Math.sign(ev.deltaY) * 0.09), 4.2, 16);
         self.console.lastInteract = self.console.time;
+        if (self.console.director) {
+          self.console.setDirector(false);
+          if (self.onDirectorChange) self.onDirectorChange(false);
+        }
       }, { passive: false });
     },
 

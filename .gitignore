@@ -3,3 +3,5 @@ __pycache__/
 threat_report_*.json
 .venv/
 node_modules/
+offensive_emulator/data/
+data/

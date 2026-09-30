@@ -119,6 +119,26 @@ PHASE_SCRIPTS = {
 
 PHASE_KEYS = list(PHASE_SCRIPTS.keys())
 
+# Synthetic request paths per phase (used to emit request events in
+# simulation mode so the network inspector + replay work without aiohttp).
+PHASE_REQUESTS = {
+    "recon": [("/api/users", 200), ("/api/admin", 200), ("/api/config", 200), ("/api/export", 200),
+              ("/.env", 200), ("/debug/vars", 200), ("/api/internal/database", 200),
+              ("/secrets.json", 200), ("/swagger.json", 200), ("/admin", 200),
+              ("/internal", 200), ("/api/debug", 200), ("/.git/config", 200), ("/metrics", 200)],
+    "exploit": [("/api/v1/user/profile", 200), ("/api/v1/subscription/upgrade", 200),
+                ("/api/v1/promo/validate", 200), ("/api/v1/user/profile", 200)],
+    "persistence": [("/api/v1/admin/users", 201), ("/api/v1/admin/api-keys", 201),
+                    ("/api/v1/webhooks", 201), ("/api/v1/admin/tasks", 201)],
+    "lateral_movement": [("/api/v1/services", 200), ("/.env", 200), ("/.aws/credentials", 200),
+                         ("/.ssh/id_rsa", 200), ("/gcp-key.json", 200), ("/etc/ssl/private/server.key", 200)],
+    "exfiltration": [("/api/v1/users?page=1&limit=1000", 200), ("/api/v1/users?page=2&limit=1000", 200),
+                     ("/api/v1/transactions?limit=1000", 200), ("/api/v1/data", 200),
+                     ("/.env", 200), ("/.aws/credentials", 200)],
+    "cover_tracks": [("/api/v1/admin/logs/delete", 200), ("/api/v1/security/events/purge", 200),
+                     ("/api/v1/admin/logs", 201), ("/api/v1/cache/clear", 200)],
+}
+
 
 class SimulationEngine:
     """Replays a realistic, randomized 6-phase kill chain without any network."""
@@ -130,7 +150,7 @@ class SimulationEngine:
         self.rng = random.Random(seed if seed is not None else random.getrandbits(48))
         self.context = _SimContext()
 
-    async def run(self, on_phase=None, on_log=None) -> Dict[str, Any]:
+    async def run(self, on_phase=None, on_log=None, on_request=None) -> Dict[str, Any]:
         start = time.time()
         results: Dict[str, bool] = {}
         timings: Dict[str, float] = {}
@@ -154,9 +174,17 @@ class SimulationEngine:
 
             t0 = time.time()
             script = PHASE_SCRIPTS[key]
+            reqs = PHASE_REQUESTS.get(key, [])
+            req_i = 0
             for line, rel in script:
                 if on_log:
                     on_log(line, "INFO")
+                # emit synthetic request events interleaved with the log lines
+                if on_request and reqs and self.rng.random() < 0.55:
+                    path, status = reqs[req_i % len(reqs)]
+                    req_i += 1
+                    on_request("GET" if status != 201 else "POST", path, status,
+                               self.rng.uniform(18, 240))
                 lo, hi = self.preset["delay"]
                 await asyncio.sleep(self.rng.uniform(lo, hi) * rel * 2.2)
 

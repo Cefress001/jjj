@@ -254,11 +254,16 @@ class UnifiedOffensiveEmulator:
             phase_time = time.time() - phase_start
             self.context.phase_timings["cover_tracks"] = phase_time
 
-            logger.info(f"\n✓ COVER TRACKS COMPLETE ({phase_time:.2f}s)")
-            logger.info(f"  Logs deleted: {self.context.logs_deleted}")
-            logger.info(f"  Artifacts removed: {self.context.artifacts_removed}")
-            logger.info(f"  Traces visible: {self.context.traces_visible}")
-            return True
+            covered = (self.context.logs_deleted > 0 or self.context.artifacts_removed > 0)
+
+            if covered:
+                logger.info(f"\n✓ COVER TRACKS COMPLETE ({phase_time:.2f}s)")
+                logger.info(f"  Logs deleted: {self.context.logs_deleted}")
+                logger.info(f"  Artifacts removed: {self.context.artifacts_removed}")
+                logger.info(f"  Traces visible: {self.context.traces_visible}")
+            else:
+                logger.info(f"\n✗ COVER TRACKS FAILED ({phase_time:.2f}s) — defenses held the audit trail")
+            return covered
 
         except Exception as e:
             logger.error(f"✗ COVER TRACKS ERROR: {e}")

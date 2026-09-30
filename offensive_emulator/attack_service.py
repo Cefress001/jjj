@@ -6,10 +6,19 @@ Manages attack runs in background threads:
                        (requires aiohttp; pip install aiohttp)
   • SIMULATION       — zero-dependency simulator (always available)
 
-Exposes run state: status, phase, progress, streaming logs, final report.
+Structured EVENT stream (backbone for the console, request inspector,
+mission replay and defense telemetry):
+
+  {seq, t, kind:"phase",    phase, state}
+  {seq, t, kind:"request",  method, path, status, ms, defense?}
+  {seq, t, kind:"defense",  type, detail}        (aggregated from requests)
+
+Runs persist to data/runs/<id>.json and are reloaded at boot, so history,
+reports and replays survive server restarts.
 """
 
 import asyncio
+import json
 import logging
 import random
 import sys
@@ -47,6 +56,7 @@ else:
     _HAS_REAL_ENGINES = False
 
 from simulator import SimulationEngine  # noqa: E402
+import remediation  # noqa: E402
 
 ENGINE_MODE = "real" if _HAS_REAL_ENGINES else "simulation"
 
@@ -64,11 +74,14 @@ PHASES: List[Dict[str, str]] = [
 ]
 
 PRESETS = {
-    "stealth":    {"name": "Stealth",    "tag": "slow · quiet · max evasion",  "color": "#34d399"},
-    "balanced":   {"name": "Balanced",   "tag": "normal speed (recommended)",  "color": "#22d3ee"},
-    "aggressive": {"name": "Aggressive", "tag": "fast · concurrent · noisy",   "color": "#fbbf24"},
-    "maximum":    {"name": "Maximum",    "tag": "full speed · no evasion",     "color": "#f43f5e"},
+    "stealth":    {"name": "Stealth",    "tag": "slow · quiet · max evasion",  "color": "#34d399", "delay": [0.14, 0.34]},
+    "balanced":   {"name": "Balanced",   "tag": "normal speed (recommended)",  "color": "#22d3ee", "delay": [0.04, 0.12]},
+    "aggressive": {"name": "Aggressive", "tag": "fast · concurrent · noisy",   "color": "#fbbf24", "delay": [0.0, 0.03]},
+    "maximum":    {"name": "Maximum",    "tag": "full speed · no evasion",     "color": "#f43f5e", "delay": [0.0, 0.0]},
 }
+
+MAX_LOGS = 2600
+MAX_EVENTS = 4000
 
 
 class AttackAborted(Exception):
@@ -76,7 +89,7 @@ class AttackAborted(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Log capture: route engine log records into the owning run
+# Log/event capture: route engine records into the owning run
 # ---------------------------------------------------------------------------
 
 _ENGINE_PREFIXES = ("attack_modules", "offensive_emulator_unified",
@@ -110,11 +123,148 @@ for _h in list(_root.handlers):
 if not any(isinstance(h, logging.NullHandler) for h in _root.handlers):
     _root.addHandler(logging.NullHandler())
 
-MAX_LOGS = 2600
 
+# ---------------------------------------------------------------------------
+# aiohttp request tracer + preset pacing
+# ---------------------------------------------------------------------------
+
+def _url_path(u) -> str:
+    """Best-effort 'method path' string from a URL-ish object."""
+    try:
+        s = str(u)
+        # yarl URLs expose .path/.query
+        path = getattr(u, "path", None)
+        if path:
+            q = getattr(u, "query", "") or ""
+            return str(path) + (("?" + str(q)) if q else "")
+        return s[:140]
+    except Exception:
+        return "<url>"
+
+
+def _install_request_tracer() -> bool:
+    """
+    Wrap aiohttp.ClientSession._request so every request the engines make is
+    recorded (method/path/status/latency/defense) and paced per preset.
+    Falls back silently to the unpatched session if anything goes wrong.
+    """
+    if not _HAS_AIOHTTP:
+        return False
+    try:
+        orig = aiohttp.ClientSession._request
+
+        async def _traced(self, method, str_or_url, **kwargs):
+            run = getattr(_thread_ctx, "current_run", None)
+            if run is not None:
+                # preset pacing — every request, both engines share this
+                lo, hi = PRESETS.get(run.preset, PRESETS["balanced"])["delay"]
+                if hi > 0:
+                    await asyncio.sleep(random.uniform(lo, hi))
+            t0 = time.time()
+            try:
+                resp = await orig(self, method, str_or_url, **kwargs)
+            except Exception as exc:
+                if run is not None:
+                    run._add_request_event(str(method), _url_path(str_or_url), 0,
+                                           (time.time() - t0) * 1000.0,
+                                           error=str(exc)[:70])
+                raise
+            if run is not None:
+                defense = None
+                try:
+                    defense = resp.headers.get("X-Defense") or None
+                except Exception:
+                    pass
+                try:
+                    shown_url = resp.request_info.url
+                except Exception:
+                    shown_url = str_or_url
+                run._add_request_event(str(method), _url_path(shown_url), resp.status,
+                                       (time.time() - t0) * 1000.0, defense=defense)
+            return resp
+
+        aiohttp.ClientSession._request = _traced
+        return True
+    except Exception:
+        return False
+
+
+TRACER_INSTALLED = _install_request_tracer()
+
+
+# ---------------------------------------------------------------------------
+# Run persistence
+# ---------------------------------------------------------------------------
+
+DATA_DIR = _BASE_DIR / "data" / "runs"
+MAX_PERSISTED_EVENTS = 2000
+MAX_PERSISTED_LOGS = 600
+MAX_ARCHIVE_LOAD = 60
+
+
+def persist_run(run: "AttackRun") -> None:
+    """Atomically write a finished run to data/runs/<id>.json."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_id": run.run_id,
+            "target": run.target,
+            "preset": run.preset,
+            "engine": run.engine,
+            "status": run.status,
+            "created_at": run.created_at,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at,
+            "phase_states": run.phase_states,
+            "progress": run.progress,
+            "severity": (run.report or {}).get("summary", {}).get("severity"),
+            "report": run.report,
+            "events": list(run.events)[:MAX_PERSISTED_EVENTS],
+            "logs": list(run.logs)[-MAX_PERSISTED_LOGS:],
+        }
+        tmp = DATA_DIR / (run.run_id + ".tmp")
+        tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        tmp.replace(DATA_DIR / (run.run_id + ".json"))
+    except Exception:
+        pass  # persistence must never break a run
+
+
+def load_archived_runs() -> int:
+    """Load past runs from disk into the registry. Returns count loaded."""
+    if not DATA_DIR.is_dir():
+        return 0
+    count = 0
+    files = sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for fp in files[:MAX_ARCHIVE_LOAD]:
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            run = AttackRun(data.get("target", "unknown"), data.get("preset", "balanced"),
+                            data.get("engine"))
+            run.run_id = data.get("run_id", fp.stem)
+            run.status = data.get("status", "complete")
+            run.created_at = data.get("created_at", 0)
+            run.started_at = data.get("started_at")
+            run.finished_at = data.get("finished_at")
+            run.phase_states = data.get("phase_states", run.phase_states)
+            run.progress = data.get("progress", 100.0)
+            run.report = data.get("report")
+            run.events = list(data.get("events", []))
+            run.logs = list(data.get("logs", []))
+            run.archived = True
+            with _runs_lock:
+                _runs[run.run_id] = run
+            count += 1
+        except Exception:
+            continue
+    return count
+
+
+# ---------------------------------------------------------------------------
+# AttackRun
+# ---------------------------------------------------------------------------
 
 class AttackRun:
-    """One attack execution with live state."""
+    """One attack execution with live state and a structured event stream."""
 
     def __init__(self, target: str, preset: str, engine: Optional[str] = None):
         self.run_id = uuid.uuid4().hex[:8]
@@ -122,6 +272,7 @@ class AttackRun:
         self.preset = preset if preset in PRESETS else "balanced"
         self.engine = engine or ENGINE_MODE
         self.created_at = time.time()
+        self.archived = False
 
         self.status = "queued"            # queued | running | complete | failed | aborted
         self.phase_states: Dict[str, str] = {p["key"]: "pending" for p in PHASES}
@@ -131,6 +282,8 @@ class AttackRun:
 
         self.logs: List[Dict[str, Any]] = []
         self.logs_dropped = 0
+        self.events: List[Dict[str, Any]] = []
+        self.events_dropped = 0
         self.report: Optional[Dict[str, Any]] = None
 
         self.started_at: Optional[float] = None
@@ -139,7 +292,26 @@ class AttackRun:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
 
-    # ---------------------------------------------------------------- state
+    # ---------------------------------------------------------------- events
+
+    def _add_event(self, kind: str, **payload) -> None:
+        with self._lock:
+            ev = {"seq": len(self.events) + self.events_dropped,
+                  "t": round(time.time(), 3), "kind": kind}
+            ev.update(payload)
+            self.events.append(ev)
+            if len(self.events) > MAX_EVENTS:
+                drop = len(self.events) - MAX_EVENTS
+                self.events = self.events[drop:]
+                self.events_dropped += drop
+
+    def _add_request_event(self, method: str, path: str, status: int, ms: float,
+                           error: Optional[str] = None, defense: Optional[str] = None) -> None:
+        self._add_event("request", method=method, path=path[:160], status=int(status),
+                        ms=round(ms, 1), phase=self.current_phase,
+                        error=error, defense=defense)
+
+    # ------------------------------------------------------------------ logs
 
     def _add_log(self, message: str, level: str = "INFO") -> None:
         entry = {"i": len(self.logs) + self.logs_dropped, "t": round(time.time(), 3),
@@ -154,6 +326,8 @@ class AttackRun:
     def log(self, message: str, level: str = "INFO") -> None:
         self._add_log(message, level)
 
+    # ----------------------------------------------------------------- phase
+
     def set_phase(self, key: str, state: str) -> None:
         with self._lock:
             self.phase_states[key] = state
@@ -166,6 +340,7 @@ class AttackRun:
                 self.progress = max(self.progress, idx / len(PHASES) * 100.0)
             elif state in ("complete", "failed", "skipped"):
                 self.progress = max(self.progress, (idx + 1) / len(PHASES) * 100.0)
+        self._add_event("phase", phase=key, state=state)
 
     def cancel(self) -> bool:
         if self.status in ("running", "queued"):
@@ -179,10 +354,13 @@ class AttackRun:
 
     # -------------------------------------------------------------- snapshot
 
-    def snapshot(self, after: int = -1, include_report: bool = False) -> Dict[str, Any]:
+    def snapshot(self, after: int = -1, after_event: int = -1,
+                 include_report: bool = False) -> Dict[str, Any]:
         with self._lock:
             logs = [e for e in self.logs if e["i"] > after]
             total_logs = len(self.logs) + self.logs_dropped
+            events = [e for e in self.events if e["seq"] > after_event]
+            total_events = len(self.events) + self.events_dropped
         snap = {
             "run_id": self.run_id,
             "target": self.target,
@@ -195,8 +373,14 @@ class AttackRun:
             "logs": logs,
             "log_total": total_logs,
             "logs_dropped": self.logs_dropped,
+            "events": events,
+            "event_total": total_events,
+            "events_dropped": self.events_dropped,
             "elapsed_s": round((self.started_at and (self.finished_at or time.time()) - self.started_at) or 0.0, 2),
             "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "archived": self.archived,
             "error": self.error,
         }
         if include_report and self.report:
@@ -214,7 +398,7 @@ class AttackRun:
 
 _runs: Dict[str, AttackRun] = {}
 _runs_lock = threading.Lock()
-MAX_RUNS_KEPT = 40
+MAX_RUNS_KEPT = 60
 
 
 def get_run(run_id: str) -> Optional[AttackRun]:
@@ -232,7 +416,9 @@ def _register(run: AttackRun) -> None:
     with _runs_lock:
         _runs[run.run_id] = run
         if len(_runs) > MAX_RUNS_KEPT:
-            for rid in list(_runs)[:-MAX_RUNS_KEPT]:
+            for rid in sorted(_runs, key=lambda k: _runs[k].created_at):
+                if len(_runs) <= MAX_RUNS_KEPT:
+                    break
                 if _runs[rid].status in ("complete", "failed", "aborted"):
                     del _runs[rid]
 
@@ -272,6 +458,7 @@ def _thread_main(run: AttackRun) -> None:
             loop.close()
         except Exception:
             pass
+        persist_run(run)
         _thread_ctx.current_run = None
 
 
@@ -281,7 +468,9 @@ async def _execute(run: AttackRun) -> None:
     run.log("═" * 62, "PHASE")
     run.log(f"  OFFENSIVE EMULATOR · run {run.run_id}", "PHASE")
     run.log(f"  target  : {run.target}", "INFO")
-    run.log(f"  profile : {run.preset} · engine: {run.engine.upper()}", "INFO")
+    run.log(f"  profile : {run.preset} · engine: {run.engine.upper()}"
+            + ("" if TRACER_INSTALLED or run.engine != "real" else " · tracing unavailable"),
+            "INFO")
     run.log("═" * 62, "PHASE")
 
     phase_by_key = {p["key"]: p for p in PHASES}
@@ -305,20 +494,20 @@ async def _execute(run: AttackRun) -> None:
             raise AttackAborted()
         run.log(message, level)
 
-    try:
-        if run.engine == "real" and _HAS_REAL_ENGINES:
-            emulator = UnifiedOffensiveEmulator(target_url=run.target, run_id=run.run_id)
-            report = await emulator.run_full_attack(on_phase=on_phase)
-        else:
-            sim = SimulationEngine(run.target, run.run_id, run.preset)
-            report = await sim.run(on_phase=on_phase, on_log=on_sim_log)
-    except AttackAborted:
-        raise
-    except Exception:
-        raise
-    finally:
-        pass
+    def on_sim_request(method: str, path: str, status: int, ms: float) -> None:
+        if run.cancelled:
+            raise AttackAborted()
+        run._add_request_event(method, path, status, ms)
 
+    if run.engine == "real" and _HAS_REAL_ENGINES:
+        emulator = UnifiedOffensiveEmulator(target_url=run.target, run_id=run.run_id)
+        report = await emulator.run_full_attack(on_phase=on_phase)
+    else:
+        sim = SimulationEngine(run.target, run.run_id, run.preset)
+        report = await sim.run(on_phase=on_phase, on_log=on_sim_log, on_request=on_sim_request)
+
+    # enrich with MITRE mapping, remediation advice and defense posture
+    report = remediation.enrich(report, run.events)
     run.report = report
     run.status = "complete"
     run.progress = 100.0
@@ -326,8 +515,13 @@ async def _execute(run: AttackRun) -> None:
     # closing summary in the log stream
     summary = report.get("summary", {})
     run.log("═" * 62, "PHASE")
-    run.log(f"  MISSION COMPLETE · severity: {summary.get('severity', '?')} · "
+    run.log(f"  MISSION COMPLETE · verdict: {report.get('verdict', '?')}", "OK")
+    run.log(f"  severity: {summary.get('severity', '?')} · "
             f"success rate: {summary.get('attack_success_rate', '?')}", "OK")
+    defense = report.get("defense", {})
+    if defense.get("total_blocks"):
+        run.log(f"  defenses engaged: {defense['total_blocks']} blocks "
+                f"({', '.join(f'{k}×{v}' for k, v in defense['by_type'].items())})", "WARN")
     run.log("═" * 62, "PHASE")
 
 
@@ -343,8 +537,14 @@ def run_cli(target: str, preset: str = "balanced") -> Dict[str, Any]:
     return run.snapshot(include_report=True)
 
 
+# Load archived runs at import time (best effort)
+try:
+    load_archived_runs()
+except Exception:
+    pass
+
+
 if __name__ == "__main__":
-    import json
     import argparse
 
     ap = argparse.ArgumentParser(description="Attack service smoke test")
@@ -352,4 +552,4 @@ if __name__ == "__main__":
     ap.add_argument("--preset", default="balanced")
     args = ap.parse_args()
     result = run_cli(args.target, args.preset)
-    print(json.dumps({k: v for k, v in result.items() if k != "logs"}, indent=2, default=str))
+    print(json.dumps({k: v for k, v in result.items() if k not in ("logs", "events")}, indent=2, default=str))

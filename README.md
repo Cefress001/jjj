@@ -1,4 +1,4 @@
-# ⚔ Offensive Emulator v4 — Unified App
+# ⚔ Offensive Emulator v4.1 — Unified App
 
 An autonomous red-team simulation platform rebuilt as **one app**:
 a cinematic 3D landing page that opens into a live **3D mission console**,
@@ -13,17 +13,29 @@ Open <http://localhost:8000>, press **LAUNCH CONSOLE**, and fire.
 
 ---
 
-## What it does
+## What's in v4.1 (the premium pass)
 
-| | |
-|---|---|
-| **Landing page** | 3D attack-core hero (Three.js, WebGL). Click **LAUNCH CONSOLE** to warp into the app. |
-| **Mission console** | Interactive 3D kill-chain: drag to orbit, scroll to zoom, hover/click phase nodes. Live terminal, phase telemetry, HUD, target-side request counter. |
-| **6-phase engine** | Recon → Exploit → Persistence → Lateral Movement → Exfiltration → Cover Tracks, with state-dependent gating (a failed phase skips its dependents, like a real attack). |
-| **Real or simulated** | With `aiohttp` installed the engines fire **real HTTP requests**. Without it, a zero-dependency simulator produces the same telemetry and reports. |
-| **Built-in demo target** | **VulnPay** — a deliberately vulnerable mock SaaS API served at `/demo`. Zero setup: the console pre-fills it as the target. |
-| **Reports** | Threat report modal (severity, chain success ring, findings, impact metrics) + downloadable standalone HTML/JSON reports. |
-| **CLI mode** | `python run.py --target URL` runs a headless attack and saves `threat_report_<run>.json`. |
+**Console experience**
+- **Director camera** — during a run the camera auto-glides to the live phase; any drag hands control back (`D` to toggle)
+- **Network inspector** — every request the engines fire, live: method, path, status, latency, filterable; defense blocks flagged 🛡
+- **Mission replay** — DVR scrubber under the 3D stage: replay any completed run's terminal, traffic and 3D phase states at 1×/2×/4× (`R`)
+- **Sound design** — synthesized launch rumble, phase ticks, defense alarms, completion chimes (`M` to mute; no audio files, pure WebAudio)
+- **Onboarding tour** — spotlight walkthrough on first visit (`?` for shortcuts, restartable)
+- **Animated count-ups**, keyboard shortcuts (`Enter`, `1–6`, `D`, `R`, `M`, `Esc`, `?`)
+
+**Depth**
+- **Three demo difficulties** — EASY (full breach), HARDENED (JWT verified, secrets locked — breach contained), FORTIFIED (target holds). Defenses actually fire: 401/403/404/WAF/rate-limits, counted live
+- **MITRE ATT&CK mapping** — every phase and report links its techniques (T1595, T1190, T1136, …)
+- **Remediation engine** — prioritized, concrete fixes derived from what *actually succeeded* in each run
+- **Run persistence + compare** — runs survive restarts (`data/runs/`); select any two in the archive for a side-by-side before/after-hardenening diff
+- **Print-ready reports** — HTML report with print stylesheet + one-click Print/PDF
+- **Verdicts** — "FULL BREACH / BREACH CONTAINED / TARGET HELD" at a glance
+
+**Engineering**
+- **Event backbone** — structured phase/request/defense events stream to the UI (cursor-based, like logs)
+- **Request tracing** — one choke-point wrapper on `aiohttp.ClientSession` records every request; presets now pace *real* requests (stealth is actually slow)
+- **Test suite** — `pytest` (41 tests) + a jsdom DOM integration test driving the real UI
+- **Dockerfile** — `docker build -t offensive-emulator . && docker run -p 8000:8000 offensive-emulator`
 
 ## Quick start
 
@@ -38,10 +50,10 @@ python run.py
 
 In the console:
 
-1. **Target** — keep the built-in demo (`http://localhost:8000/demo`) or point at a target you own.
+1. **Target** — keep the built-in demo and pick a difficulty (EASY / HARDENED / FORTIFIED), or point at a target you own.
 2. **Profile** — pick an aggressiveness preset (below).
-3. **INITIATE ATTACK** — watch the 3D chain light up phase by phase, logs streaming live.
-4. When the run completes, the threat report opens automatically.
+3. **INITIATE ATTACK** — watch the 3D chain light up phase by phase; flip to the NETWORK tab to watch live traffic.
+4. When the run completes: threat report (MITRE + remediation), replay (`R`), print/PDF, and compare against a later run from the archive.
 
 ## Attack profiles
 
@@ -62,6 +74,7 @@ In the console:
 6. **06 · Cover Tracks** — log deletion, audit purge, false-flag attribution
 
 Each phase feeds the next: no access → no persistence → no lateral movement → no exfiltration.
+Against HARDENED/FORTIFIED targets you'll watch the chain break — and see exactly where.
 
 ## One app — architecture
 
@@ -69,13 +82,17 @@ Each phase feeds the next: no access → no persistence → no lateral movement 
 run.py                          ← THE entry point (server or headless CLI)
 offensive_emulator/
 ├── app_server.py               ← unified server: UI + API + demo target (stdlib only)
-├── attack_service.py           ← run manager: threads, progress, log streaming, cancel
+├── attack_service.py           ← run manager: threads, event stream, tracing, persistence
 ├── simulator.py                ← zero-dependency simulation engine (fallback)
-├── demo_target.py              ← built-in vulnerable "VulnPay" app + telemetry
+├── demo_target.py              ← built-in vulnerable "VulnPay" app · 3 difficulty modes
+├── remediation.py              ← MITRE mapping + remediation knowledge base
 ├── offensive_emulator_unified.py  ← 6-phase orchestrator (real engines)
 ├── attack_modules/             ← the real per-phase HTTP attack engines
 ├── config.py · evasion.py · metrics.py · adaptive_learning.py
+├── data/runs/                  ← persisted runs (gitignored)
 └── static/                     ← landing + console (HTML/CSS/JS + vendored Three.js)
+tests/                          ← pytest suite + jsdom DOM integration test
+Dockerfile
 ```
 
 ### HTTP API
@@ -83,14 +100,21 @@ offensive_emulator/
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | status, engine mode, demo target URL |
-| `GET` | `/api/configs` | phases + profile presets |
+| `GET` | `/api/configs` | phases, presets, MITRE map, demo targets |
 | `POST` | `/api/attack/start` | `{target, preset}` → new run |
-| `GET` | `/api/attack/{id}/status?after=N` | live status + logs since cursor `N` |
+| `GET` | `/api/attack/{id}/status?after=N&after_event=M` | live status + logs/events since cursors |
 | `POST` | `/api/attack/{id}/cancel` | abort a run |
-| `GET` | `/api/attack/{id}/report` | JSON threat report |
-| `GET` | `/api/attack/{id}/report.html` | standalone HTML report (download) |
-| `GET` | `/api/attack/list` | run history |
-| `GET` | `/api/demo/stats` | requests received by the demo target |
+| `GET` | `/api/attack/{id}/report` | JSON threat report (MITRE, remediation, defense) |
+| `GET` | `/api/attack/{id}/report.html?print=1` | standalone HTML report (auto-print) |
+| `GET` | `/api/attack/list` | run history (incl. archived runs) |
+| `GET` | `/api/demo/stats` | requests + defense blocks per demo mode |
+
+### Tests
+
+```bash
+python -m pytest tests/ -q              # backend: modes, service, server, integrity
+npm i jsdom && node tests/js/dom_flow.js  # frontend: full UI flow in a real DOM
+```
 
 ## ⚠ Ethics
 
@@ -100,4 +124,4 @@ This is a **defensive security testing tool**.
 - ✅ Use in closed sandbox/lab environments
 - ❌ Never point it at production systems without written authorization
 
-The built-in demo target exists so you always have something safe to attack.
+The built-in demo target (three difficulty modes) exists so you always have something safe to attack.

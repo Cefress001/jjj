@@ -2,8 +2,17 @@
 Built-in Demo Target — "VulnPay", a deliberately vulnerable mock SaaS API.
 
 Served by the app server under /demo/* so the platform can be tried
-end-to-end with zero setup.  Every response is crafted so the real attack
-engines traverse a complete 6-phase kill chain against it.
+end-to-end with zero setup.
+
+Three difficulty modes (selected by URL prefix):
+  /demo/...            EASY       — everything misconfigured, full kill chain
+  /demo/hardened/...   HARDENED   — JWT verified, secrets blocked, one race
+                                    condition left; chain breaks at lateral
+  /demo/fortified/...  FORTIFIED  — locked down; chain breaks at exploit
+
+When a defense blocks a request, the response carries an `X-Defense` header
+(auth_block | waf_block | rate_limit | hidden) which the request tracer
+turns into defense events in the console and report.
 
 This is a MOCK. It stores nothing, owns nothing, and exists only to be
 attacked inside your own sandbox.
@@ -18,38 +27,55 @@ from typing import Dict, List, Optional, Tuple
 APP_NAME = "VulnPay"
 APP_TAGLINE = "Payments demo target (intentionally vulnerable)"
 
+MODES = ("easy", "hardened", "fortified")
+
 # ----------------------------------------------------------------------------
 # Telemetry (shown live in the console while a run is in progress)
 # ----------------------------------------------------------------------------
 
 _lock = threading.Lock()
-_telemetry: Dict[str, object] = {
-    "requests": 0,
-    "by_method": {},
-    "recent": [],          # last 40 hits: {t, method, path, status}
-    "started_at": time.time(),
-}
 
 
-def _record_hit(method: str, path: str, status: int) -> None:
+def _new_mode_telemetry():
+    return {
+        "requests": 0,
+        "by_method": {},
+        "defenses": {},      # type -> count
+        "recent": [],        # last 25 hits: {t, method, path, status}
+    }
+
+
+_telemetry: Dict[str, object] = {m: _new_mode_telemetry() for m in MODES}
+
+
+def _record_hit(mode: str, method: str, path: str, status: int, defense: Optional[str]) -> None:
     with _lock:
-        _telemetry["requests"] += 1
-        _telemetry["by_method"][method] = _telemetry["by_method"].get(method, 0) + 1
-        _telemetry["recent"].append(
-            {"t": round(time.time(), 3), "method": method, "path": path, "status": status}
+        t = _telemetry[mode]
+        t["requests"] += 1
+        t["by_method"][method] = t["by_method"].get(method, 0) + 1
+        if defense:
+            t["defenses"][defense] = t["defenses"].get(defense, 0) + 1
+        t["recent"].append(
+            {"t": round(time.time(), 3), "method": method, "path": path,
+             "status": status, "defense": defense}
         )
-        if len(_telemetry["recent"]) > 40:
-            _telemetry["recent"] = _telemetry["recent"][-40:]
+        if len(t["recent"]) > 25:
+            t["recent"] = t["recent"][-25:]
 
 
 def get_telemetry() -> Dict[str, object]:
     with _lock:
-        return {
-            "app": APP_NAME,
-            "requests": _telemetry["requests"],
-            "by_method": dict(_telemetry["by_method"]),
-            "recent": list(_telemetry["recent"]),
-        }
+        out = {}
+        for m in MODES:
+            src = _telemetry[m]
+            out[m] = {
+                "requests": src["requests"],
+                "by_method": dict(src["by_method"]),
+                "defenses": dict(src["defenses"]),
+                "recent": list(src["recent"]),
+            }
+        out["app"] = APP_NAME
+        return out
 
 
 # ----------------------------------------------------------------------------
@@ -162,6 +188,7 @@ H7jK0lP3oI6uY9tR2eW5qX8cV1bN4m<...FAKE KEY FOR DEMO TARGET...>
 -----END RSA PRIVATE KEY-----
 """
 
+# NOTE: AWS's public documentation example values — nothing real
 _AWS_CREDENTIALS = """# NOTE: all values are AWS's public documentation examples — nothing real
 [default]
 aws_access_key_id = AKIAIOSFODNN7EXAMPLE
@@ -193,75 +220,188 @@ def _json(obj):
     return json.dumps(obj)
 
 
+def _blocked(status: int, dtype: str, detail: str):
+    """A defense fired. The X-Defense header is what the tracer reads."""
+    return (status, "application/json",
+            _json({"error": detail, "blocked_by": dtype}),
+            {"X-Defense": dtype})
+
+
+def _hidden():
+    """Properly hardened: 404, revealing nothing."""
+    return 404, "application/json", _json({"error": "not found"}), {"X-Defense": "hidden"}
+
+
 # ----------------------------------------------------------------------------
-# Route table
+# Landing pages per mode
 # ----------------------------------------------------------------------------
 
-def _landing_page() -> str:
-    return """<!doctype html>
-<html><head><meta charset="utf-8"><title>VulnPay — demo target</title>
+def _landing_page(mode: str) -> str:
+    tier = {"easy": ("EASY", "#34d399", "Wide open. Misconfigured on purpose."),
+            "hardened": ("HARDENED", "#fbbf24", "JWT verified · secrets locked · one race condition left."),
+            "fortified": ("FORTIFIED", "#22d3ee", "Locked down. The chain should break at exploitation.")}[mode]
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>VulnPay — {tier[0]} demo target</title>
 <meta name="generator" content="Next.js 14 (App Router)">
 <style>
- body{background:#0b1220;color:#dbe7ff;font-family:system-ui,Segoe UI,sans-serif;
-      display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
- .card{max-width:560px;padding:40px;border:1px solid #1f2f52;border-radius:16px;
-       background:#0e1730;text-align:center}
- h1{margin:0 0 6px;font-size:34px;letter-spacing:2px}
- p{color:#7d8db0;margin:6px 0}
- .warn{color:#f43f5e;font-weight:600}
- code{color:#2dd4bf}
+ body{{background:#0b1220;color:#dbe7ff;font-family:system-ui,Segoe UI,sans-serif;
+      display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}
+ .card{{max-width:560px;padding:40px;border:1px solid #1f2f52;border-radius:16px;
+       background:#0e1730;text-align:center}}
+ h1{{margin:0 0 6px;font-size:34px;letter-spacing:2px}}
+ p{{color:#7d8db0;margin:6px 0}}
+ .tier{{color:{tier[1]};font-weight:700;letter-spacing:3px;font-size:13px}}
+ .warn{{color:#f43f5e;font-weight:600}}
+ code{{color:#2dd4bf}}
 </style></head>
 <body><div class="card">
  <h1>⚡ VulnPay</h1>
- <p>Payments demo API — <span class="warn">intentionally vulnerable</span></p>
+ <p class="tier">DIFFICULTY: {tier[0]}</p>
+ <p>{tier[2]}</p>
  <p>This is the built-in target of Offensive Emulator.<br>
     Launch the console, keep this URL as the target, and press <code>INITIATE ATTACK</code>.</p>
  <p style="font-size:12px;opacity:.6">It stores nothing and talks to no one — it only pretends to be pwned.</p>
 </div></body></html>"""
 
 
+# ----------------------------------------------------------------------------
+# Route table
+# ----------------------------------------------------------------------------
+
 def handle_demo_request(method: str, path: str, query: Dict[str, List[str]],
-                         body: Optional[bytes] = None) -> Tuple[int, str, str, Optional[Dict[str, str]]]:
+                         body: Optional[bytes] = None):
     """
     Handle a request aimed at the demo target.
     `path` is the full path starting with /demo.
     Returns (status, content_type, body, extra_headers).
     """
-    # strip the /demo prefix
-    sub = path[len("/demo"):]
-    if sub == "":
-        sub = "/"
+    # ---- difficulty mode from the path prefix
+    mode = "easy"
+    if path == "/demo/hardened" or path.startswith("/demo/hardened/"):
+        mode, sub = "hardened", path[len("/demo/hardened"):] or "/"
+    elif path == "/demo/fortified" or path.startswith("/demo/fortified/"):
+        mode, sub = "fortified", path[len("/demo/fortified"):] or "/"
+    else:
+        sub = path[len("/demo"):] or "/"
     if not sub.startswith("/"):
         sub = "/" + sub
 
-    status, ctype, payload, headers = _route(method, sub, query, body or b"")
+    status, ctype, payload, headers = _route(method, sub, query, body or b"", mode)
 
-    # fake a plausible infra fingerprint
-    base_headers = {
-        "Server": "nginx/1.22.1",
-        "X-Powered-By": "Express",
-        "X-Cache": "HIT",
-    }
+    base_headers = {"Server": "nginx/1.22.1", "X-Powered-By": "Express", "X-Cache": "HIT"}
     if headers:
         base_headers.update(headers)
-    _record_hit(method, sub, status)
+    defense = (headers or {}).get("X-Defense")
+    _record_hit(mode, method, sub, status, defense)
 
-    # artificial "network" latency so a run against the demo target unfolds
-    # at a watchable pace in the console (≈12–15s for the full chain)
+    # artificial "network" latency so a run unfolds at a watchable pace
     time.sleep(random.uniform(0.12, 0.4))
-
     return status, ctype, payload, base_headers
 
 
-def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes):
-    q = {k: v[0] for k, v in query.items() if v}
+# per-mode flags for a few stateful behaviors
+_rate_hits: Dict[str, Dict[str, int]] = {"hardened": {}, "fortified": {}}
 
-    # ---- root / dashboard -------------------------------------------------
+
+def _rate_limited(bucket: str, limit: int = 1) -> bool:
+    """Return True when the caller has exceeded `limit` requests in this bucket."""
+    n = _rate_hits[bucket].get(bucket, 0)
+    _rate_hits[bucket][bucket] = n + 1
+    return n >= limit
+
+
+def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes, mode: str):
+    # flatten query params: {"page": ["2"]} -> {"page": "2"}
+    q: Dict[str, str] = {k: v[0] for k, v in (query or {}).items() if v}
+    hardened = mode == "hardened"
+    fortified = mode == "fortified"
+
+    # ---- root / dashboard ----------------------------------------------
     if sub in ("/", ""):
-        return _ok(_landing_page(), "text/html; charset=utf-8")
-
+        return _ok(_landing_page(mode), "text/html; charset=utf-8")
     if sub == "/favicon.ico":
         return 404, "text/plain", "not found", None
+
+    # ============================ FORTIFIED ==============================
+    # A properly locked-down app: public docs only, everything else denied.
+    if fortified:
+        allowed_public = {
+            "/openapi.json": {"openapi": "3.0.0", "info": {"title": "VulnPay API", "version": "2.4.1"},
+                              "paths": {"/api/v1/health": {}}},
+            "/health": {"status": "ok"},
+            "/api/v1/health": {"status": "ok"},
+        }
+        if method == "GET" and sub in allowed_public:
+            return _ok(_json(allowed_public[sub]))
+        if method == "GET" and sub == "/metrics":
+            return _ok("http_requests_total 884213\n", "text/plain")
+        # everything else: WAF for injective payloads, 401 for auth-y paths, else 404
+        if sub.startswith("/api/v1/promo"):
+            return _blocked(403, "waf_block", "request blocked by WAF (rule sqli-0042)")
+        if sub.startswith("/api/v1/subscription"):
+            if _rate_limited("fortified:sub", 2):
+                return _blocked(429, "rate_limit", "too many requests — idempotent retries enforced")
+            return _blocked(403, "auth_block", "subscription changes require verified auth")
+        if sub.startswith("/api/") or sub.startswith("/admin") or sub.startswith("/debug"):
+            return _blocked(401, "auth_block", "authentication required")
+        return _hidden()
+
+    # ============================ HARDENED ===============================
+    # Fixed the worst stuff, still has a race condition + webhook registration.
+    if hardened:
+        # public, harmless surfaces
+        allowed = {
+            "/api/users": {"users": [_user(i) for i in range(5)], "total": _USERS_PER_PAGE * _USERS_PAGES},
+            "/api/v1/subscription": {"plans": ["free", "basic", "premium"], "upgrade_path": "/api/v1/subscription/upgrade"},
+            "/openapi.json": {"openapi": "3.0.0", "info": {"title": "VulnPay API"}, "paths": {"/api/v1/subscription/upgrade": {}}},
+            "/api/v1/health": {"status": "ok"},
+            "/health": {"status": "ok"},
+        }
+        if method == "GET" and sub in allowed:
+            return _ok(_json(allowed[sub]))
+        if method == "GET" and sub == "/metrics":
+            return _ok("http_requests_total 884213\n", "text/plain")
+        # the surviving weakness: no idempotency on subscription endpoints
+        if sub in ("/api/v1/subscription/upgrade", "/api/v1/subscription") and method == "POST":
+            return _ok(_json({"upgraded": True, "tier": "premium", "charged": False, "race_window_ms": 42}))
+        # promo: input validated now — injection attempts get WAF'd
+        if sub == "/api/v1/promo/validate" and method == "POST":
+            try:
+                data = json.loads(body.decode() or "{}")
+            except Exception:
+                data = {}
+            code = str(data.get("code") or "")
+            if any(tok in code for tok in ("'", "OR", "*", "--", ";")) or data.get("code") is None:
+                return _blocked(403, "waf_block", "request blocked by WAF (rule sqli-0042)")
+            return _ok(_json({"valid": False, "approved": False, "message": "invalid promo code"}))
+        # webhook registration still allowed (the forgotten corner)
+        if sub == "/api/v1/webhooks" and method == "POST":
+            return _created(_json({"created": True, "url": "https://attacker.example/collect",
+                                   "events": ["user.*"], "secret": None}))
+        # services are visible (info leak) but hold no credentials
+        if sub == "/api/v1/services" and method == "GET":
+            return _ok(_json({"services": ["auth-service", "payments-db", "redis-cache"]}))
+        # bulk export rate-limited hard
+        if sub == "/api/v1/users" and method == "GET":
+            if _rate_limited("hardened:exfil", 2):
+                return _blocked(429, "rate_limit", "export rate limit exceeded")
+            return _ok(_json({"page": 1, "users": [], "total": 0}))
+        # everything else is locked: auth, admin, secrets, files
+        if sub.startswith("/api/v1/admin") or sub.startswith("/admin"):
+            return _blocked(403, "auth_block", "admin area requires verified admin auth")
+        if sub.startswith("/api/v1/user") or sub.startswith("/api/v1/account") or sub.startswith("/api/v1/billing"):
+            return _blocked(401, "auth_block", "JWT signature verification failed")
+        if sub.startswith("/debug") or sub.startswith("/internal") or sub.startswith("/api/debug"):
+            return _blocked(403, "auth_block", "debug endpoints disabled")
+        if sub.startswith("/api/v1/sessions") or sub.startswith("/api/v1/audit") or \
+           sub.startswith("/api/v1/logs") or sub.startswith("/api/v1/security") or \
+           sub.startswith("/api/v1/cache") or sub.startswith("/api/v1/uploads") or \
+           sub.startswith("/api/v1/events"):
+            return _blocked(403, "auth_block", "operation not permitted")
+        return _hidden()
+
+    # ============================== EASY =================================
+    # (the original pushover)
 
     # ---- recon: endpoint enumeration --------------------------------------
     recon_json = {
@@ -303,11 +443,8 @@ def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes):
         return _ok(_json({"rps": 412, "p99_ms": 88, "errors": 12, "authenticated_admins": 3}))
 
     if method == "GET" and sub == "/metrics":
-        return _ok(
-            "http_requests_total 884213\nhttp_requests_duration_ms_p99 88\n"
-            "db_connections_active 25\nadmin_logins_total 17\n",
-            "text/plain",
-        )
+        return _ok("http_requests_total 884213\nhttp_requests_duration_ms_p99 88\n"
+                   "db_connections_active 25\nadmin_logins_total 17\n", "text/plain")
 
     if method == "GET" and sub in ("/health", "/api/v1/health"):
         return _ok(_json({"status": "ok", "uptime_s": 918273, "checks": {"db": "up", "redis": "up"}}))
@@ -365,7 +502,6 @@ def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes):
 
     # ---- exploitation ---------------------------------------------------------
     if sub == "/api/v1/user/profile":
-        # Vulnerability: profile endpoint trusts whatever role the client claims.
         if method in ("GET", "PATCH", "PUT"):
             if method in ("PATCH", "PUT"):
                 return _ok(_json({"updated": True, "role": "admin", "is_admin": True, "note": "role field is client-controlled"}))
@@ -377,7 +513,6 @@ def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes):
         return 405, "application/json", _json({"error": "method not allowed"}), None
 
     if sub == "/api/v1/subscription/upgrade" and method == "POST":
-        # Vulnerability: no idempotency key — race conditions galore.
         return _ok(_json({"upgraded": True, "tier": "premium", "charged": False, "race_window_ms": 42}))
 
     if sub == "/api/v1/billing/subscribe" and method == "POST":
@@ -387,7 +522,6 @@ def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes):
         return _ok(_json({"tier": "enterprise", "max_seats": 999999, "billing_active": True}))
 
     if sub == "/api/v1/promo/validate" and method == "POST":
-        # Vulnerability: echoes client-provided discount as truth.
         try:
             data = json.loads(body.decode() or "{}")
         except Exception:
@@ -408,7 +542,7 @@ def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes):
         return _created(_json({"created": True, "username": data.get("username", "unknown"), "role": data.get("role", "admin"), "id": 9001}))
 
     if sub == "/api/v1/admin/api-keys" and method == "POST":
-        return _created(_json({"created": True, "key": "vpk_live_9f3ac1d7e2b45f68", "scopes": ["*"], "expires": "never"}))
+        return _created(_json({"created": True, "key": "vpk_demo_fake_api_key_not_real", "scopes": ["*"], "expires": "never"}))
 
     if sub == "/api/v1/webhooks" and method == "POST":
         return _created(_json({"created": True, "url": "https://attacker.example/collect", "events": ["user.*", "payment.*"], "secret": None}))
@@ -461,7 +595,6 @@ def _route(method: str, sub: str, query: Dict[str, List[str]], body: bytes):
     if method == "DELETE" and sub in cover_ok_deletes:
         return _ok(_json({"purged": True, "records": random.randint(120, 3300)}))
     if method == "POST" and sub == "/api/v1/admin/logs":
-        # accepts forged log entries — used for false-flag attribution
         return _created(_json({"written": True, "entries": 3, "accepted": "unsigned"}))
 
     # ---- default -------------------------------------------------------------------------
