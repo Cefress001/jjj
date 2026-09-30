@@ -4,6 +4,7 @@ import json
 import stat
 import time
 
+import pytest
 
 SAMPLE = {
     "site": [{
@@ -47,6 +48,32 @@ def test_zap_json_is_normalized():
     assert report["findings"][0]["urls"] == ["http://example.test/"]
     assert report["attack_chain"]["phase_2_exploit"] is False
     assert report["recommendations"][0]["fix"]
+
+
+def test_zap_parser_tolerates_malformed_numeric_metadata():
+    from zap_adapter import extract_alerts
+
+    findings = extract_alerts({"alerts": [{
+        "alert": "Fixture", "cweid": "not-a-number", "wascid": {},
+        "instances": [{"uri": "https://example.test/"}],
+    }]})
+    assert findings[0]["cwe_id"] == 0
+    assert findings[0]["wasc_id"] == 0
+
+
+def test_zap_cancellation_is_prompt(tmp_path, monkeypatch):
+    import zap_adapter
+
+    fake = tmp_path / "zap-baseline.py"
+    fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("ZAP_BASELINE_COMMAND", str(fake))
+    started = time.time()
+    with pytest.raises(InterruptedError):
+        zap_adapter.run_baseline(
+            "https://example.test", "run", lambda *args: None,
+            lambda: time.time() - started > 0.15, timeout=5)
+    assert time.time() - started < 3
 
 
 def test_zap_run_through_service(svc, tmp_path, monkeypatch):

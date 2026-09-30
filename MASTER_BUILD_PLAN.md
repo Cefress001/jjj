@@ -1,7 +1,9 @@
 # Offensive Emulator — Real-World Assessment Master Build Plan
 
 **Status:** Active  
-**Current milestone:** Phase 1 — Shared endpoint corpus and connected scanner pipeline (implemented; awaiting full-container smoke test)  
+**Current milestone:** Phase 1 — Shared endpoint corpus and connected scanner pipeline (implemented and audited; awaiting full-container smoke test)
+
+Detailed quality record: [`PHASE1_AUDIT.md`](PHASE1_AUDIT.md).  
 **Product constraint:** Preserve the existing one-target, one-profile, one-launch, one-report experience. New capabilities are internal pipeline stages, not competing user-facing modes.
 
 ## Product objective
@@ -389,7 +391,7 @@ A phase is complete only when:
 - [x] Feed a bounded dynamic endpoint list into Nuclei.
 - [x] Add corpus telemetry and report fields.
 - [x] Add unit and pipeline data-flow tests.
-- [x] Run the complete regression suite (80 passing tests).
+- [x] Run the complete regression suite and Phase 1 hardening audit (90 passing tests).
 - [x] Document Phase 1 completion and remaining limitations.
 
 ## Phase 1 implementation record

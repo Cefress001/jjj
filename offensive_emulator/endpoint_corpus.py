@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import posixpath
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+_MAX_URL_LENGTH = 8192
+_SENSITIVE_QUERY_PARTS = ("token", "secret", "password", "passwd", "api_key", "apikey",
+                          "authorization", "auth", "session", "jwt", "signature", "sig")
 
 _STATIC_EXTENSIONS = {
     ".7z", ".avi", ".bmp", ".css", ".eot", ".flac", ".gif", ".gz",
@@ -21,6 +25,10 @@ def canonicalize_url(value: str) -> str:
     value = str(value or "").strip()
     if not value:
         raise ValueError("empty")
+    if len(value) > _MAX_URL_LENGTH:
+        raise ValueError("too_long")
+    if any(char in value for char in ("\r", "\n", "\x00")):
+        raise ValueError("control_character")
     try:
         parts = urlsplit(value)
     except Exception as exc:
@@ -33,6 +41,11 @@ def canonicalize_url(value: str) -> str:
     host = (parts.hostname or "").lower().rstrip(".")
     if not host:
         raise ValueError("missing_host")
+    if ":" not in host:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("invalid_host") from exc
     try:
         port = parts.port
     except ValueError as exc:
@@ -53,6 +66,28 @@ def canonicalize_url(value: str) -> str:
         path += "/"
     query = urlencode(sorted(parse_qsl(parts.query, keep_blank_values=True)), doseq=True)
     return urlunsplit((scheme, authority, path, query, ""))
+
+
+def _safe_status(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        status = int(value)
+    except (TypeError, ValueError):
+        return None
+    return status if 0 <= status <= 999 else None
+
+
+def _redact_url(url: str) -> str:
+    parts = urlsplit(url)
+    pairs = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        lowered = key.lower().replace("-", "_")
+        if any(part in lowered for part in _SENSITIVE_QUERY_PARTS):
+            value = "REDACTED"
+        pairs.append((key, value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(pairs, doseq=True), ""))
 
 
 class EndpointCorpus:
@@ -90,15 +125,17 @@ class EndpointCorpus:
         existing = self._records.get(normalized)
         if existing is not None:
             self._duplicates += 1
-            if source and source not in existing["sources"]:
+            source = str(source or "unknown")[:80]
+            if source not in existing["sources"]:
                 existing["sources"].append(source)
-            method = str(method or "GET").upper()
+            method = str(method or "GET").upper()[:24]
             if method not in existing["methods"]:
                 existing["methods"].append(method)
-            if status is not None:
-                existing["status"] = int(status)
+            parsed_status = _safe_status(status)
+            if parsed_status is not None:
+                existing["status"] = parsed_status
             if content_type:
-                existing["content_type"] = str(content_type)
+                existing["content_type"] = str(content_type)[:200]
             return False
         if len(self._records) >= self.maximum:
             self._rejected["corpus_limit"] += 1
@@ -108,10 +145,10 @@ class EndpointCorpus:
             "url": normalized,
             "path": parts.path or "/",
             "query_parameters": sorted({key for key, _ in parse_qsl(parts.query, keep_blank_values=True)}),
-            "methods": [str(method or "GET").upper()],
-            "sources": [str(source or "unknown")],
-            "status": int(status) if status is not None else None,
-            "content_type": str(content_type) if content_type else None,
+            "methods": [str(method or "GET").upper()[:24]],
+            "sources": [str(source or "unknown")[:80]],
+            "status": _safe_status(status),
+            "content_type": str(content_type)[:200] if content_type else None,
             "static": self._is_static(normalized),
             "order": len(self._records),
         }
@@ -133,8 +170,12 @@ class EndpointCorpus:
         self.primary_url = normalized
         return True
 
-    def records(self) -> List[Dict[str, Any]]:
-        return [dict(record) for record in self._records.values()]
+    def records(self, redact: bool = False) -> List[Dict[str, Any]]:
+        records = copy.deepcopy(list(self._records.values()))
+        if redact:
+            for record in records:
+                record["url"] = _redact_url(record["url"])
+        return records
 
     def urls(self, include_static: bool = True, limit: Optional[int] = None) -> List[str]:
         records = self._records.values()
@@ -152,7 +193,7 @@ class EndpointCorpus:
             source_counts.update(record["sources"])
         return {
             "status": "ready",
-            "primary_url": self.primary_url,
+            "primary_url": _redact_url(self.primary_url),
             "scope_hostname": self.scope_hostname,
             "accepted": len(self._records),
             "dynamic": sum(1 for r in self._records.values() if not r["static"]),
@@ -161,5 +202,5 @@ class EndpointCorpus:
             "rejected": sum(self._rejected.values()),
             "rejected_by_reason": dict(self._rejected),
             "by_source": dict(source_counts),
-            "records": self.records(),
+            "records": self.records(redact=True),
         }

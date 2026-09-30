@@ -61,3 +61,41 @@ def test_corpus_limit_is_recorded():
     assert corpus.add("https://example.com/one", "katana")
     assert not corpus.add("https://example.com/two", "katana")
     assert corpus.summary()["rejected_by_reason"]["corpus_limit"] == 1
+
+
+def test_corpus_report_redacts_secrets_but_scanner_input_keeps_them():
+    from endpoint_corpus import EndpointCorpus
+
+    corpus = EndpointCorpus("https://example.com/")
+    corpus.add("https://example.com/callback?token=abc123&view=full", "katana")
+    assert "token=abc123" in corpus.urls()[1]
+    reported = corpus.summary()["records"][1]["url"]
+    assert "abc123" not in reported
+    assert "token=REDACTED" in reported
+    assert "view=full" in reported
+
+
+def test_corpus_handles_bad_metadata_and_returns_defensive_copies():
+    from endpoint_corpus import EndpointCorpus
+
+    corpus = EndpointCorpus("https://example.com/")
+    assert corpus.add("https://example.com/api", "x" * 200,
+                      method="custom-method-that-is-too-long", status="not-a-number",
+                      content_type="a" * 500)
+    record = corpus.records()[1]
+    assert record["status"] is None
+    assert len(record["sources"][0]) == 80
+    assert len(record["methods"][0]) == 24
+    assert len(record["content_type"]) == 200
+    record["sources"].append("mutated")
+    assert "mutated" not in corpus.records()[1]["sources"]
+
+
+def test_unicode_hosts_are_normalized_and_oversized_urls_rejected():
+    from endpoint_corpus import EndpointCorpus, canonicalize_url
+
+    assert canonicalize_url("https://BÜCHER.example/path") == \
+        "https://xn--bcher-kva.example/path"
+    corpus = EndpointCorpus("https://example.com/")
+    assert not corpus.add("https://example.com/" + "a" * 9000, "katana")
+    assert corpus.summary()["rejected_by_reason"]["too_long"] == 1

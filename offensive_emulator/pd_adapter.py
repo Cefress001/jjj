@@ -23,6 +23,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from process_utils import popen_group_options, stop_process_tree
+
 
 class ToolError(RuntimeError):
     pass
@@ -31,7 +33,11 @@ class ToolError(RuntimeError):
 def _command(name: str) -> Optional[List[str]]:
     configured = os.environ.get(name.upper() + "_COMMAND", "").strip()
     if configured:
-        return shlex.split(configured)
+        try:
+            parsed = shlex.split(configured)
+        except ValueError:
+            return None
+        return parsed or None
     executable = shutil.which(name)
     return [executable] if executable else None
 
@@ -54,40 +60,41 @@ def availability() -> Dict[str, Dict[str, Any]]:
 
 
 def _run_jsonl(name: str, args: List[str], log: Callable[[str, str], None],
-               cancelled: Callable[[], bool], timeout: int) -> List[Dict[str, Any]]:
+               cancelled: Callable[[], bool], timeout: int,
+               max_records: int = 5000) -> List[Dict[str, Any]]:
     cmd = _command(name)
     if not cmd:
         raise ToolError(f"{name} is not installed")
     started = time.time()
     process = subprocess.Popen(
         cmd + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        **popen_group_options(),
     )
     stdout: "queue.Queue[Optional[str]]" = queue.Queue()
     stderr: "queue.Queue[Optional[str]]" = queue.Queue()
 
     def reader(stream, destination) -> None:
-        if stream:
-            for line in stream:
-                destination.put(line)
-        destination.put(None)
+        try:
+            if stream:
+                for line in stream:
+                    destination.put(line)
+        finally:
+            destination.put(None)
 
     threading.Thread(target=reader, args=(process.stdout, stdout), daemon=True).start()
     threading.Thread(target=reader, args=(process.stderr, stderr), daemon=True).start()
     records: List[Dict[str, Any]] = []
     out_done = err_done = False
+    limit_logged = False
     error_tail: List[str] = []
     try:
         while True:
             if cancelled():
-                process.terminate()
-                try:
-                    process.wait(timeout=4)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+                stop_process_tree(process)
                 raise InterruptedError(f"{name} scan cancelled")
             if time.time() - started > timeout:
-                process.kill()
+                stop_process_tree(process)
                 raise ToolError(f"{name} exceeded the {timeout}s time limit")
             try:
                 line = stdout.get(timeout=0.05)
@@ -99,7 +106,11 @@ def _run_jsonl(name: str, args: List[str], log: Callable[[str, str], None],
                         try:
                             item = json.loads(text)
                             if isinstance(item, dict):
-                                records.append(item)
+                                if len(records) < max_records:
+                                    records.append(item)
+                                elif not limit_logged:
+                                    limit_logged = True
+                                    log(f"{name} · output capped at {max_records} records", "WARN")
                         except json.JSONDecodeError:
                             log(f"{name} · {text[:400]}", "INFO")
             except queue.Empty:
@@ -121,7 +132,7 @@ def _run_jsonl(name: str, args: List[str], log: Callable[[str, str], None],
                 break
     finally:
         if process.poll() is None:
-            process.kill()
+            stop_process_tree(process)
     if process.returncode != 0:
         raise ToolError(f"{name} exited with {process.returncode}: {' | '.join(error_tail[-3:])}")
     return records
@@ -133,7 +144,7 @@ def run_httpx(target: str, preset: str, log: Callable[[str, str], None],
     records = _run_jsonl(
         "httpx", ["-u", target, "-json", "-silent", "-tech-detect", "-title",
                   "-status-code", "-content-type", "-follow-redirects", "-rl", rate],
-        log, cancelled, 120,
+        log, cancelled, 120, max_records=1000,
     )
     assets = []
     technologies = []
@@ -158,7 +169,7 @@ def run_katana(target: str, preset: str, log: Callable[[str, str], None],
     records = _run_jsonl(
         "katana", ["-u", target, "-jsonl", "-silent", "-d", depth,
                    "-rl", rate, "-c", "2", "-p", "2", "-fs", "fqdn"],
-        log, cancelled, 300,
+        log, cancelled, 300, max_records=5000,
     )
     endpoints = []
     endpoint_records = []
@@ -211,10 +222,19 @@ def run_nuclei(targets: Union[str, List[str]], preset: str,
                log: Callable[[str, str], None],
                cancelled: Callable[[], bool]) -> Dict[str, Any]:
     """Run Nuclei against a bounded endpoint list produced by the corpus."""
-    values = [targets] if isinstance(targets, str) else list(targets)
-    values = [str(value).strip() for value in values if str(value).strip()]
+    raw_values = [targets] if isinstance(targets, str) else list(targets)
+    values = []
+    seen = set()
+    for value in raw_values:
+        value = str(value).strip()
+        if not value or "\n" in value or "\r" in value or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+        if len(values) >= 3000:
+            break
     if not values:
-        raise ToolError("nuclei received no in-scope targets")
+        raise ToolError("nuclei received no valid in-scope targets")
     rate = {"stealth": "2", "balanced": "5", "aggressive": "10", "maximum": "20"}.get(preset, "5")
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="oe-nuclei-",
                                      suffix=".txt") as target_file:
@@ -225,7 +245,7 @@ def run_nuclei(targets: Union[str, List[str]], preset: str,
                        "-c", "2", "-bs", "1", "-timeout", "8", "-retries", "1",
                        "-etags", "dos,fuzz,intrusive", "-severity",
                        "info,low,medium,high,critical"],
-            log, cancelled, 600,
+            log, cancelled, 600, max_records=5000,
         )
     return {"records_count": len(records), "targets_scanned": len(values),
             "findings": [_nuclei_finding(x) for x in records]}

@@ -57,6 +57,8 @@ regression scanning, and operator-defined business workflows.
 Phase 1 is implemented: httpx establishes the canonical target, Katana and ZAP
 feed a shared in-scope endpoint corpus, and Nuclei consumes a profile-bounded
 list of discovered dynamic endpoints instead of scanning only the root URL.
+See [`PHASE1_AUDIT.md`](PHASE1_AUDIT.md) for the hardening results, test matrix,
+and the remaining full-container smoke-test gate.
 
 ## Quick start
 

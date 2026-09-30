@@ -8,12 +8,11 @@ isolated, and all findings are normalized into the existing report.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict
 
 import pd_adapter
 import zap_adapter
 from endpoint_corpus import EndpointCorpus
-
 
 _NUCLEI_ENDPOINT_BUDGET = {
     "stealth": 25,
@@ -99,11 +98,14 @@ def run_installed(target: str, preset: str, run_id: str,
         results["katana"] = _run_tool(
             "katana", lambda: pd_adapter.run_katana(
                 corpus.primary_url, preset, log, cancelled), log)
-        for record in results["katana"].get("endpoint_records", []) or []:
+        endpoint_records = results["katana"].get("endpoint_records", []) or []
+        for record in endpoint_records:
             corpus.add(record.get("url", ""), "katana",
                        method=record.get("method") or "GET",
                        status=record.get("status"),
                        content_type=record.get("content_type"))
+        if not endpoint_records:
+            corpus.add_many(results["katana"].get("endpoints", []) or [], "katana")
     else:
         results["katana"] = {"status": "unavailable", "reason": installed["katana"].get("reason")}
     progress(2, 4)

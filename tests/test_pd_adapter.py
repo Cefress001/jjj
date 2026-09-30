@@ -1,6 +1,9 @@
 """ProjectDiscovery adapters and combined-report normalization."""
 
 import stat
+import time
+
+import pytest
 
 
 def _tool(tmp_path, name, json_line):
@@ -51,6 +54,74 @@ def test_projectdiscovery_jsonl_adapters(tmp_path, monkeypatch):
     assert nu["targets_scanned"] == 1
 
 
+def test_jsonl_runner_caps_output_and_survives_invalid_utf8(tmp_path, monkeypatch):
+    import pd_adapter
+
+    tool = tmp_path / "httpx"
+    tool.write_bytes(
+        b"#!/usr/bin/env python3\n"
+        b"import os\n"
+        b"os.write(1, b'bad-utf8: \\xff\\n')\n"
+        b"for i in range(5): print('{\\\"url\\\": \\\"https://example.test/%d\\\"}' % i)\n"
+    )
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("HTTPX_COMMAND", str(tool))
+    logs = []
+    records = pd_adapter._run_jsonl(
+        "httpx", [], lambda message, level: logs.append((level, message)),
+        lambda: False, timeout=3, max_records=2)
+    assert len(records) == 2
+    assert any("output capped" in message for _, message in logs)
+    assert any("bad-utf8" in message for _, message in logs)
+
+
+def test_jsonl_runner_cancellation_is_prompt(tmp_path, monkeypatch):
+    import pd_adapter
+
+    tool = tmp_path / "httpx"
+    tool.write_text(
+        "#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n",
+        encoding="utf-8",
+    )
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("HTTPX_COMMAND", str(tool))
+    started = time.time()
+    with pytest.raises(InterruptedError):
+        pd_adapter._run_jsonl(
+            "httpx", [], lambda *args: None,
+            lambda: time.time() - started > 0.15, timeout=5)
+    assert time.time() - started < 3
+
+
+def test_nuclei_target_file_deduplicates_and_rejects_line_injection(tmp_path, monkeypatch):
+    import pd_adapter
+
+    captured = tmp_path / "targets.txt"
+    tool = tmp_path / "nuclei"
+    tool.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib,sys\n"
+        "p=pathlib.Path(sys.argv[sys.argv.index('-l')+1])\n"
+        f"pathlib.Path({str(captured)!r}).write_text(p.read_text())\n",
+        encoding="utf-8",
+    )
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("NUCLEI_COMMAND", str(tool))
+    result = pd_adapter.run_nuclei(
+        ["https://example.test/a", "https://example.test/a",
+         "https://example.test/good\nhttps://outside.test/injected"],
+        "balanced", lambda *args: None, lambda: False)
+    assert result["targets_scanned"] == 1
+    assert captured.read_text().splitlines() == ["https://example.test/a"]
+
+
+def test_malformed_command_configuration_is_reported_unavailable(monkeypatch):
+    import pd_adapter
+
+    monkeypatch.setenv("HTTPX_COMMAND", "'unterminated")
+    assert pd_adapter.availability()["httpx"]["available"] is False
+
+
 def test_connected_pipeline_feeds_discovery_to_nuclei(monkeypatch):
     import scanner_pipeline
 
@@ -96,6 +167,35 @@ def test_connected_pipeline_feeds_discovery_to_nuclei(monkeypatch):
     assert corpus["by_source"]["katana"] == 1
     assert corpus["rejected_by_reason"]["out_of_scope"] == 1
     assert corpus["selected_for_nuclei"] == len(received["targets"])
+
+
+def test_pipeline_continues_when_upstream_tool_fails(monkeypatch):
+    import scanner_pipeline
+
+    monkeypatch.setattr(scanner_pipeline, "availability", lambda: {
+        "httpx": {"available": True}, "katana": {"available": True},
+        "zap": {"available": False, "reason": "fixture"},
+        "nuclei": {"available": True},
+    })
+
+    def fail_httpx(*args):
+        raise RuntimeError("fixture failure")
+
+    seen = {}
+    monkeypatch.setattr(scanner_pipeline.pd_adapter, "run_httpx", fail_httpx)
+    monkeypatch.setattr(scanner_pipeline.pd_adapter, "run_katana", lambda target, *args: {
+        "endpoints": [target + "/api"], "endpoint_records": [{"url": target + "/api"}],
+    })
+    monkeypatch.setattr(scanner_pipeline.pd_adapter, "run_nuclei", lambda targets, *args: (
+        seen.update(targets=list(targets)) or
+        {"records_count": 0, "targets_scanned": len(targets), "findings": []}
+    ))
+    results = scanner_pipeline.run_installed(
+        "https://example.test", "balanced", "run", lambda *args: None,
+        lambda: False, lambda *args: None)
+    assert results["httpx"]["status"] == "failed"
+    assert results["katana"]["status"] == "complete"
+    assert "https://example.test/api" in seen["targets"]
 
 
 def test_pipeline_merge_preserves_existing_report():

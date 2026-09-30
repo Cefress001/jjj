@@ -9,6 +9,9 @@
 FROM projectdiscovery/httpx:latest AS httpx
 FROM projectdiscovery/katana:latest AS katana
 FROM projectdiscovery/nuclei:latest AS nuclei
+# Bake a template snapshot into the image so the first scan does not depend on
+# a runtime template download. Phase 8 will add explicit signed-version pinning.
+RUN nuclei -update-templates -update-template-dir /opt/nuclei-templates
 
 FROM ghcr.io/zaproxy/zaproxy:stable
 
@@ -20,6 +23,7 @@ WORKDIR /app
 COPY --from=httpx /usr/local/bin/httpx /usr/local/bin/httpx
 COPY --from=katana /usr/local/bin/katana /usr/local/bin/katana
 COPY --from=nuclei /usr/local/bin/nuclei /usr/local/bin/nuclei
+COPY --from=nuclei --chown=zap:zap /opt/nuclei-templates /home/zap/nuclei-templates
 
 COPY --chown=zap:zap run.py requirements.txt ./
 COPY --chown=zap:zap offensive_emulator ./offensive_emulator
@@ -32,7 +36,8 @@ ENV PYTHONUNBUFFERED=1 \
     ZAP_BASELINE_COMMAND="/zap/zap-baseline.py -m 2" \
     HTTPX_COMMAND="/usr/local/bin/httpx" \
     KATANA_COMMAND="/usr/local/bin/katana" \
-    NUCLEI_COMMAND="/usr/local/bin/nuclei"
+    NUCLEI_COMMAND="/usr/local/bin/nuclei" \
+    NUCLEI_TEMPLATES_DIR="/home/zap/nuclei-templates"
 
 USER zap
 EXPOSE 8000

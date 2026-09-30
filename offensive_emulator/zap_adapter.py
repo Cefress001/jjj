@@ -24,8 +24,9 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from typing import Any, Callable, Dict, List, Optional
+
+from process_utils import popen_group_options, stop_process_tree
 
 
 class ZapUnavailable(RuntimeError):
@@ -39,7 +40,11 @@ class ZapScanError(RuntimeError):
 def command() -> Optional[List[str]]:
     configured = os.environ.get("ZAP_BASELINE_COMMAND", "").strip()
     if configured:
-        return shlex.split(configured)
+        try:
+            parsed = shlex.split(configured)
+        except ValueError:
+            return None
+        return parsed or None
     executable = shutil.which("zap-baseline.py")
     return [executable] if executable else None
 
@@ -70,10 +75,17 @@ def _confidence(alert: Dict[str, Any]) -> str:
     return value.split(" ", 1)[0] or "Unknown"
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _instances(alert: Dict[str, Any]) -> List[Dict[str, Any]]:
     instances = alert.get("instances")
     if isinstance(instances, list):
-        return [x for x in instances if isinstance(x, dict)]
+        return [x for x in instances if isinstance(x, dict)][:500]
     # Older ZAP JSON formats put the instance fields directly on the alert.
     return [{k: alert.get(k) for k in ("uri", "url", "method", "param", "evidence", "attack")
              if alert.get(k) not in (None, "")}]
@@ -89,7 +101,7 @@ def extract_alerts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             raw.extend(x for x in site["alerts"] if isinstance(x, dict))
 
     findings: List[Dict[str, Any]] = []
-    for alert in raw:
+    for alert in raw[:10000]:
         instances = _instances(alert)
         urls = []
         for instance in instances:
@@ -104,8 +116,8 @@ def extract_alerts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             "description": str(alert.get("desc") or alert.get("description") or ""),
             "solution": str(alert.get("solution") or ""),
             "reference": str(alert.get("reference") or ""),
-            "cwe_id": int(alert.get("cweid") or 0),
-            "wasc_id": int(alert.get("wascid") or 0),
+            "cwe_id": _safe_int(alert.get("cweid")),
+            "wasc_id": _safe_int(alert.get("wascid")),
             "urls": urls,
             "instances": instances,
             "source": "OWASP ZAP",
@@ -223,7 +235,8 @@ def run_baseline(target: str, run_id: str,
         try:
             process = subprocess.Popen(
                 full_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                **popen_group_options(),
             )
         except OSError as exc:
             raise ZapUnavailable(f"Could not start OWASP ZAP: {exc}") from exc
@@ -232,24 +245,22 @@ def run_baseline(target: str, run_id: str,
         lines: "queue.Queue[Optional[str]]" = queue.Queue()
 
         def read_output() -> None:
-            if process.stdout:
-                for item in process.stdout:
-                    lines.put(item)
-            lines.put(None)
+            try:
+                if process.stdout:
+                    for item in process.stdout:
+                        lines.put(item)
+            finally:
+                lines.put(None)
 
         threading.Thread(target=read_output, daemon=True).start()
         reader_done = False
         try:
             while True:
                 if cancelled():
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                    stop_process_tree(process, grace_seconds=5)
                     raise InterruptedError("ZAP scan cancelled")
                 if time.time() - started > timeout:
-                    process.kill()
+                    stop_process_tree(process, grace_seconds=5)
                     raise ZapScanError(f"ZAP baseline exceeded the {timeout}s time limit")
                 try:
                     line = lines.get(timeout=0.1)
@@ -258,6 +269,8 @@ def run_baseline(target: str, run_id: str,
                     else:
                         clean = line.rstrip()
                         output.append(clean)
+                        if len(output) > 200:
+                            del output[:-200]
                         if clean:
                             log("ZAP · " + clean[:500], "INFO")
                 except queue.Empty:
@@ -266,15 +279,17 @@ def run_baseline(target: str, run_id: str,
                     break
         finally:
             if process.poll() is None:
-                process.kill()
+                stop_process_tree(process, grace_seconds=2)
 
         if process.returncode not in (0, 1, 2):
             tail = " | ".join(output[-4:])
             raise ZapScanError(f"ZAP baseline failed with exit code {process.returncode}: {tail}")
         if not report_path.is_file():
             raise ZapScanError("ZAP completed without producing its JSON report")
+        if report_path.stat().st_size > 64 * 1024 * 1024:
+            raise ZapScanError("ZAP JSON report exceeded the 64 MB safety limit")
         try:
-            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            payload = json.loads(report_path.read_text(encoding="utf-8", errors="replace"))
         except Exception as exc:
             raise ZapScanError(f"ZAP produced an invalid JSON report: {exc}") from exc
 
